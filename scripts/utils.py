@@ -134,16 +134,27 @@ def save_settings(settings_path: Path, settings: dict[str, Any]) -> bool:
 def get_hook_command(script_name: str, claude_dir: Path | None = None) -> str:
     """Get the command path for a hook script.
 
+    Uses ~ for home directory to ensure portability across machines.
+
     Args:
         script_name: Name of the script (e.g., "observe_pre.py")
         claude_dir: Optional custom claude directory. If None, uses ~/.claude/
 
     Returns:
-        Full path to the hook script.
+        Path to the hook script using ~ notation.
     """
     if claude_dir is None:
-        claude_dir = Path.home() / ".claude"
-    return str(claude_dir / "instincts" / "bin" / script_name)
+        # Use ~ notation for portability
+        return f"~/.claude/instincts/bin/{script_name}"
+
+    # Check if claude_dir is under home directory
+    home = Path.home()
+    try:
+        relative = claude_dir.relative_to(home)
+        return f"~/{relative}/instincts/bin/{script_name}"
+    except ValueError:
+        # Not under home directory, use absolute path
+        return str(claude_dir / "instincts" / "bin" / script_name)
 
 
 def is_instinct_hook(hook: dict[str, Any], script_name: str) -> bool:
