@@ -25,6 +25,14 @@ class PatternType(Enum):
     TOOL_PREFERENCE = "tool_preference"
 
 
+class PatternSource(Enum):
+    """Source of pattern detection for dual-approach analysis."""
+
+    ALGORITHM = "algorithm"  # Detected by algorithm-based detection
+    LLM = "llm"  # Detected by LLM-based detection
+    MERGED = "merged"  # Detected by both approaches
+
+
 @dataclass(frozen=True)
 class Evidence:
     """Evidence of a detected pattern.

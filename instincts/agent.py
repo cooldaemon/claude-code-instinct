@@ -20,9 +20,11 @@ from instincts.confidence import (
     calculate_initial_confidence,
     check_dormant_status,
 )
-from instincts.config import OBSERVATIONS_FILE, PERSONAL_DIR
+from instincts.config import MAX_OBSERVATIONS_FOR_ANALYSIS, OBSERVATIONS_FILE, PERSONAL_DIR
+from instincts.llm_patterns import detect_patterns_with_llm, is_llm_available
 from instincts.models import Instinct, Pattern
-from instincts.patterns import detect_all_patterns
+from instincts.pattern_merger import merge_patterns
+from instincts.patterns import detect_all_patterns, load_recent_observations
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +45,7 @@ class AnalysisResult:
         instincts_updated: Number of existing instincts updated.
         warnings: Tuple of warning messages (immutable).
         patterns: Tuple of detected patterns (immutable).
+        detection_sources: Tuple of detection sources used (AC-R2.8).
     """
 
     patterns_detected: int
@@ -50,6 +53,7 @@ class AnalysisResult:
     instincts_updated: int
     warnings: tuple[str, ...]
     patterns: tuple[Pattern, ...] = field(default_factory=tuple)
+    detection_sources: tuple[str, ...] = field(default=("algorithm",))
 
 
 def _generate_instinct_id(pattern: Pattern) -> str:
@@ -103,6 +107,26 @@ def _generate_instinct_content(pattern: Pattern) -> str:
         lines.append(f"- ... and {remaining} more observations")
 
     return "\n".join(lines)
+
+
+def _escape_yaml_string(value: str) -> str:
+    """Escape a string for safe YAML double-quoted string.
+
+    Prevents YAML injection attacks by escaping special characters
+    that could break out of the quoted string context.
+
+    Args:
+        value: The raw string value.
+
+    Returns:
+        Escaped string safe for YAML double-quoted context.
+    """
+    # Order matters: escape backslashes first to avoid double-escaping
+    escaped = value.replace("\\", "\\\\")
+    escaped = escaped.replace('"', '\\"')
+    escaped = escaped.replace("\n", "\\n")
+    escaped = escaped.replace("\r", "\\r")
+    return escaped
 
 
 def _sanitize_instinct_id(instinct_id: str) -> str:
@@ -167,16 +191,23 @@ def _write_instinct_file(instinct: Instinct, directory: Path) -> Path:
         raise ValueError(f"Path traversal detected: {instinct.id}")
 
     # Generate file content with YAML frontmatter
+    # Escape all string fields to prevent YAML injection
+    safe_id = _escape_yaml_string(instinct.id)
+    safe_trigger = _escape_yaml_string(instinct.trigger)
+    safe_domain = _escape_yaml_string(instinct.domain)
+    safe_source = _escape_yaml_string(instinct.source)
+    safe_status = _escape_yaml_string(instinct.status)
+
     content = f"""---
-id: {instinct.id}
-trigger: "{instinct.trigger}"
+id: "{safe_id}"
+trigger: "{safe_trigger}"
 confidence: {instinct.confidence}
-domain: {instinct.domain}
-source: {instinct.source}
+domain: "{safe_domain}"
+source: "{safe_source}"
 evidence_count: {instinct.evidence_count}
 created_at: "{instinct.created_at.isoformat()}"
 updated_at: "{instinct.updated_at.isoformat()}"
-status: {instinct.status}
+status: "{safe_status}"
 ---
 
 {instinct.content}
@@ -201,6 +232,10 @@ def _load_existing_instincts(directory: Path) -> list[Instinct]:
         return instincts
 
     for file_path in directory.glob("*.md"):
+        # Skip symlinks for defense in depth
+        if file_path.is_symlink():
+            logger.warning("Skipping symlink: %s", file_path)
+            continue
         try:
             content = file_path.read_text()
             instinct = _parse_instinct_file(content, str(file_path))
@@ -299,27 +334,71 @@ def _parse_instinct_file(content: str, source_file: str) -> Instinct | None:
     )
 
 
-def analyze_observations(dry_run: bool = False) -> AnalysisResult:
+def analyze_observations(dry_run: bool = False, skip_llm: bool = False) -> AnalysisResult:
     """Analyze observations and create/update instincts.
+
+    Uses dual-approach detection when LLM is available:
+    - Algorithm-based detection (always runs)
+    - LLM-based detection (runs when ANTHROPIC_API_KEY is set and skip_llm=False)
+    - Results are merged using pattern_merger
 
     Args:
         dry_run: If True, don't write any files.
+        skip_llm: If True, skip LLM analysis even when API key is available.
 
     Returns:
         AnalysisResult with summary of analysis.
     """
     warnings: list[str] = []
+    detection_sources: list[str] = ["algorithm"]
+
+    # Load existing instincts once - reused for LLM context and duplicate checking
+    existing_instincts = _load_existing_instincts(PERSONAL_DIR)
+    existing_ids = {inst.id for inst in existing_instincts}
 
     # Check for too many instinct files (EC-4)
-    existing_files = list(PERSONAL_DIR.glob("*.md")) if PERSONAL_DIR.exists() else []
-    if len(existing_files) >= MAX_INSTINCT_FILES_WARNING:
+    if len(existing_instincts) >= MAX_INSTINCT_FILES_WARNING:
         warnings.append(
-            f"Warning: {len(existing_files)} instinct files in personal/ - "
+            f"Warning: {len(existing_instincts)} instinct files in personal/ - "
             "this may impact performance"
         )
 
-    # Detect patterns
-    patterns = detect_all_patterns(OBSERVATIONS_FILE)
+    # Load recent observations for analysis (AC-R2.3)
+    observations = load_recent_observations(
+        OBSERVATIONS_FILE, limit=MAX_OBSERVATIONS_FOR_ANALYSIS
+    )
+
+    if not observations:
+        return AnalysisResult(
+            patterns_detected=0,
+            instincts_created=0,
+            instincts_updated=0,
+            warnings=tuple(warnings),
+            patterns=(),
+            detection_sources=tuple(detection_sources),
+        )
+
+    # Algorithm-based pattern detection (always runs)
+    algorithm_patterns = detect_all_patterns(OBSERVATIONS_FILE)
+
+    # LLM-based pattern detection (AC-R2.1, AC-R2.2)
+    llm_patterns: list[Pattern] = []
+    use_llm = is_llm_available() and not skip_llm
+
+    if use_llm:
+        detection_sources.append("llm")
+        # Use already-loaded existing instincts for LLM context (AC-R2.6)
+        existing_instincts_dicts = [
+            {"id": inst.id, "trigger": inst.trigger, "domain": inst.domain}
+            for inst in existing_instincts
+        ]
+        llm_patterns = detect_patterns_with_llm(observations, existing_instincts_dicts)
+
+    # Merge patterns from both approaches
+    if use_llm:
+        patterns = merge_patterns(algorithm_patterns, llm_patterns)
+    else:
+        patterns = algorithm_patterns
 
     if not patterns:
         return AnalysisResult(
@@ -328,11 +407,8 @@ def analyze_observations(dry_run: bool = False) -> AnalysisResult:
             instincts_updated=0,
             warnings=tuple(warnings),
             patterns=(),
+            detection_sources=tuple(detection_sources),
         )
-
-    # Load existing instincts
-    existing = _load_existing_instincts(PERSONAL_DIR)
-    existing_ids = {inst.id for inst in existing}
 
     instincts_created = 0
     instincts_updated = 0
@@ -357,6 +433,7 @@ def analyze_observations(dry_run: bool = False) -> AnalysisResult:
         instincts_updated=instincts_updated,
         warnings=tuple(warnings),
         patterns=tuple(patterns),
+        detection_sources=tuple(detection_sources),
     )
 
 

@@ -532,3 +532,227 @@ Content.
         ids = {i["id"] for i in instincts}
         assert "prefer-functional-style" in ids
         assert "md-instinct" in ids
+
+
+class TestMarkerHandling:
+    """Tests for analysis marker handling (AC-R1.5)."""
+
+    def test_observe_patterns_deletes_marker_after_analysis(self, tmp_path: Path, capsys):
+        """AC-R1.5: Should delete .analysis_pending marker after analysis completes."""
+        instincts_dir = tmp_path / "instincts"
+        instincts_dir.mkdir()
+        personal_dir = instincts_dir / "personal"
+        personal_dir.mkdir()
+        obs_file = instincts_dir / "observations.jsonl"
+        marker_file = instincts_dir / ".analysis_pending"
+
+        # Create marker file
+        marker_file.write_text('{"created_at": "2024-01-01T00:00:00Z"}')
+        assert marker_file.exists()
+
+        # Create observations
+        observations = [
+            {"event": "tool_start", "tool": "Write", "input": '{"file_path": "/app/main.py"}', "session": "s1", "timestamp": "2026-02-09T10:00:00Z"},
+            {"event": "tool_complete", "tool": "Write", "session": "s1", "timestamp": "2026-02-09T10:00:01Z"},
+        ]
+        obs_file.write_text("\n".join(json.dumps(obs) for obs in observations))
+
+        with patch("instincts.cli.OBSERVATIONS_FILE", obs_file):
+            with patch("instincts.cli.ANALYSIS_PENDING_FILE", marker_file):
+                with patch("instincts.agent.OBSERVATIONS_FILE", obs_file):
+                    with patch("instincts.agent.PERSONAL_DIR", personal_dir):
+                        result = cmd_observe_patterns()
+
+        assert result == 0
+        # Marker should be deleted after analysis
+        assert not marker_file.exists()
+
+    def test_observe_patterns_handles_missing_marker(self, tmp_path: Path, capsys):
+        """Should handle case when marker doesn't exist."""
+        instincts_dir = tmp_path / "instincts"
+        instincts_dir.mkdir()
+        personal_dir = instincts_dir / "personal"
+        personal_dir.mkdir()
+        obs_file = instincts_dir / "observations.jsonl"
+        marker_file = instincts_dir / ".analysis_pending"
+
+        # No marker file created
+        assert not marker_file.exists()
+
+        # Create observations
+        observations = [
+            {"event": "tool_start", "tool": "Write", "input": '{"file_path": "/app/main.py"}', "session": "s1", "timestamp": "2026-02-09T10:00:00Z"},
+        ]
+        obs_file.write_text("\n".join(json.dumps(obs) for obs in observations))
+
+        with patch("instincts.cli.OBSERVATIONS_FILE", obs_file):
+            with patch("instincts.cli.ANALYSIS_PENDING_FILE", marker_file):
+                with patch("instincts.agent.OBSERVATIONS_FILE", obs_file):
+                    with patch("instincts.agent.PERSONAL_DIR", personal_dir):
+                        result = cmd_observe_patterns()
+
+        # Should run without error
+        assert result == 0
+
+
+class TestCheckAnalysisPending:
+    """Tests for check_analysis_pending function."""
+
+    def test_returns_true_if_marker_exists(self, tmp_path: Path):
+        """check_analysis_pending should return True if marker file exists."""
+        from instincts.cli import check_analysis_pending
+
+        marker_file = tmp_path / ".analysis_pending"
+        marker_file.write_text('{"created_at": "2024-01-01T00:00:00Z"}')
+
+        with patch("instincts.cli.ANALYSIS_PENDING_FILE", marker_file):
+            result = check_analysis_pending()
+
+        assert result is True
+
+    def test_returns_false_if_marker_does_not_exist(self, tmp_path: Path):
+        """check_analysis_pending should return False if marker file doesn't exist."""
+        from instincts.cli import check_analysis_pending
+
+        marker_file = tmp_path / ".analysis_pending"
+        # Not creating the file
+
+        with patch("instincts.cli.ANALYSIS_PENDING_FILE", marker_file):
+            result = check_analysis_pending()
+
+        assert result is False
+
+
+class TestDeleteAnalysisPending:
+    """Tests for delete_analysis_pending function."""
+
+    def test_deletes_marker_file(self, tmp_path: Path):
+        """delete_analysis_pending should delete the marker file."""
+        from instincts.cli import delete_analysis_pending
+
+        marker_file = tmp_path / ".analysis_pending"
+        marker_file.write_text('{"created_at": "2024-01-01T00:00:00Z"}')
+        assert marker_file.exists()
+
+        with patch("instincts.cli.ANALYSIS_PENDING_FILE", marker_file):
+            delete_analysis_pending()
+
+        assert not marker_file.exists()
+
+    def test_handles_nonexistent_marker(self, tmp_path: Path):
+        """delete_analysis_pending should not fail if marker doesn't exist."""
+        from instincts.cli import delete_analysis_pending
+
+        marker_file = tmp_path / ".analysis_pending"
+        assert not marker_file.exists()
+
+        with patch("instincts.cli.ANALYSIS_PENDING_FILE", marker_file):
+            # Should not raise an exception
+            delete_analysis_pending()
+
+        assert not marker_file.exists()
+
+
+class TestSkipLlmFlag:
+    """Tests for --no-llm flag on observe-patterns command."""
+
+    def test_observe_patterns_accepts_skip_llm_flag(self, tmp_path: Path, capsys, monkeypatch):
+        """cmd_observe_patterns should accept skip_llm parameter."""
+        instincts_dir = tmp_path / "instincts"
+        instincts_dir.mkdir()
+        personal_dir = instincts_dir / "personal"
+        personal_dir.mkdir()
+        obs_file = instincts_dir / "observations.jsonl"
+
+        observations = [
+            {"event": "tool_start", "tool": "Write", "session": "s1", "timestamp": "2026-02-09T10:00:00Z"},
+        ]
+        obs_file.write_text("\n".join(json.dumps(obs) for obs in observations))
+
+        # Set API key (LLM would be available)
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+
+        with patch("instincts.cli.OBSERVATIONS_FILE", obs_file):
+            with patch("instincts.agent.OBSERVATIONS_FILE", obs_file):
+                with patch("instincts.agent.PERSONAL_DIR", personal_dir):
+                    with patch("instincts.llm_patterns.is_llm_available", return_value=True):
+                        # Should accept skip_llm=True without error
+                        result = cmd_observe_patterns(dry_run=True, skip_llm=True)
+
+        assert result == 0
+
+    def test_observe_patterns_skip_llm_skips_llm_analysis(self, tmp_path: Path, capsys, monkeypatch):
+        """cmd_observe_patterns with skip_llm=True should skip LLM analysis."""
+        from instincts.agent import AnalysisResult
+
+        instincts_dir = tmp_path / "instincts"
+        instincts_dir.mkdir()
+        personal_dir = instincts_dir / "personal"
+        personal_dir.mkdir()
+        obs_file = instincts_dir / "observations.jsonl"
+
+        observations = [
+            {"event": "tool_start", "tool": "Write", "session": "s1", "timestamp": "2026-02-09T10:00:00Z"},
+        ]
+        obs_file.write_text("\n".join(json.dumps(obs) for obs in observations))
+
+        # Set API key (LLM would be available)
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+
+        # Track if analyze_observations was called with skip_llm=True
+        captured_skip_llm = []
+
+        def mock_analyze(dry_run=False, skip_llm=False):
+            captured_skip_llm.append(skip_llm)
+            return AnalysisResult(
+                patterns_detected=0,
+                instincts_created=0,
+                instincts_updated=0,
+                warnings=(),
+                patterns=(),
+                detection_sources=("algorithm",) if skip_llm else ("algorithm", "llm"),
+            )
+
+        with patch("instincts.cli.OBSERVATIONS_FILE", obs_file):
+            with patch("instincts.cli.analyze_observations", mock_analyze):
+                with patch("instincts.llm_patterns.is_llm_available", return_value=True):
+                    cmd_observe_patterns(dry_run=True, skip_llm=True)
+
+        assert len(captured_skip_llm) >= 1
+        assert captured_skip_llm[0] is True
+
+    def test_observe_patterns_default_uses_llm(self, tmp_path: Path, capsys, monkeypatch):
+        """cmd_observe_patterns without skip_llm should use LLM when available."""
+        from instincts.agent import AnalysisResult
+
+        instincts_dir = tmp_path / "instincts"
+        instincts_dir.mkdir()
+        personal_dir = instincts_dir / "personal"
+        personal_dir.mkdir()
+        obs_file = instincts_dir / "observations.jsonl"
+
+        observations = [
+            {"event": "tool_start", "tool": "Write", "session": "s1", "timestamp": "2026-02-09T10:00:00Z"},
+        ]
+        obs_file.write_text("\n".join(json.dumps(obs) for obs in observations))
+
+        # Track if analyze_observations was called with skip_llm=False
+        captured_skip_llm = []
+
+        def mock_analyze(dry_run=False, skip_llm=False):
+            captured_skip_llm.append(skip_llm)
+            return AnalysisResult(
+                patterns_detected=0,
+                instincts_created=0,
+                instincts_updated=0,
+                warnings=(),
+                patterns=(),
+                detection_sources=("algorithm", "llm"),
+            )
+
+        with patch("instincts.cli.OBSERVATIONS_FILE", obs_file):
+            with patch("instincts.cli.analyze_observations", mock_analyze):
+                cmd_observe_patterns(dry_run=True)  # skip_llm not specified
+
+        assert len(captured_skip_llm) >= 1
+        assert captured_skip_llm[0] is False

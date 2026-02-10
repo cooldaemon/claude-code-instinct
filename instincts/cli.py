@@ -8,7 +8,8 @@ from collections import defaultdict
 from typing import Any
 
 from instincts.agent import analyze_observations, format_analysis_summary
-from instincts.config import OBSERVATIONS_FILE, PERSONAL_DIR
+from instincts.config import ANALYSIS_PENDING_FILE, OBSERVATIONS_FILE, PERSONAL_DIR
+from instincts.utils import normalize_trigger
 
 logger = logging.getLogger(__name__)
 
@@ -92,6 +93,10 @@ def load_all_instincts() -> list[dict[str, Any]]:
     # Load both .yaml and .md files (AC-7.3)
     for pattern in ("*.yaml", "*.md"):
         for file in PERSONAL_DIR.glob(pattern):
+            # Skip symlinks for defense in depth
+            if file.is_symlink():
+                logger.warning("Skipping symlink: %s", file)
+                continue
             try:
                 content = file.read_text()
                 parsed = parse_instinct_file(content)
@@ -158,7 +163,8 @@ def cmd_status() -> int:
     # Observations stats
     if OBSERVATIONS_FILE.exists():
         try:
-            obs_count = sum(1 for _ in OBSERVATIONS_FILE.open())
+            with OBSERVATIONS_FILE.open() as f:
+                obs_count = sum(1 for _ in f)
             print("-" * 60)
             print(f"  Observations: {obs_count} events logged")
             print(f"  File: {OBSERVATIONS_FILE}")
@@ -172,27 +178,10 @@ def cmd_status() -> int:
     return 0
 
 
-TRIGGER_STOP_WORDS: tuple[str, ...] = (
-    "when",
-    "creating",
-    "writing",
-    "adding",
-    "implementing",
-    "testing",
-)
-
 MIN_INSTINCTS_FOR_ANALYSIS: int = 3
 MIN_CLUSTER_SIZE: int = 2
 HIGH_CONFIDENCE_THRESHOLD: float = 0.8
 MAX_SKILL_CANDIDATES_DISPLAY: int = 5
-
-
-def _normalize_trigger(trigger: str) -> str:
-    """Normalize a trigger string by removing common stop words."""
-    normalized = trigger.lower()
-    for keyword in TRIGGER_STOP_WORDS:
-        normalized = normalized.replace(keyword, "").strip()
-    return normalized
 
 
 def _cluster_instincts_by_trigger(
@@ -202,7 +191,7 @@ def _cluster_instincts_by_trigger(
     clusters: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for inst in instincts:
         trigger = inst.get("trigger", "")
-        trigger_key = _normalize_trigger(trigger)
+        trigger_key = normalize_trigger(trigger)
         clusters[trigger_key].append(inst)
     return clusters
 
@@ -288,6 +277,24 @@ def cmd_evolve() -> int:
 MAX_PATTERNS_DISPLAY: int = 10
 
 
+def check_analysis_pending() -> bool:
+    """Check if analysis is pending (marker file exists).
+
+    Returns:
+        True if .analysis_pending marker exists, False otherwise.
+    """
+    return ANALYSIS_PENDING_FILE.exists()
+
+
+def delete_analysis_pending() -> None:
+    """Delete the analysis pending marker file if it exists."""
+    try:
+        ANALYSIS_PENDING_FILE.unlink(missing_ok=True)
+    except OSError as e:
+        # Log permission errors but don't fail
+        logger.debug("Could not delete analysis marker: %s", e)
+
+
 def _has_observations_to_analyze() -> bool:
     """Check if there are observations available for analysis."""
     if not OBSERVATIONS_FILE.exists():
@@ -317,26 +324,32 @@ def _print_detected_patterns(patterns: tuple[Any, ...]) -> None:
         print()
 
 
-def cmd_observe_patterns(dry_run: bool = False) -> int:
+def cmd_observe_patterns(dry_run: bool = False, skip_llm: bool = False) -> int:
     """Analyze observations and detect patterns.
 
     Args:
         dry_run: If True, show what would be created without writing files.
+        skip_llm: If True, skip LLM analysis even when API key is available.
 
     Returns:
         Exit code (0 for success).
     """
     if not _has_observations_to_analyze():
         _print_no_observations_message()
+        # Still delete marker if it exists (edge case: marker exists but no observations)
+        delete_analysis_pending()
         return 0
 
     if dry_run:
         print("DRY RUN - No files will be created\n")
 
-    result = analyze_observations(dry_run=dry_run)
+    result = analyze_observations(dry_run=dry_run, skip_llm=skip_llm)
     print(format_analysis_summary(result))
 
     if result.patterns:
         _print_detected_patterns(result.patterns)
+
+    # Delete the analysis pending marker after analysis completes (AC-R1.5)
+    delete_analysis_pending()
 
     return 0

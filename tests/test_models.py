@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from instincts.models import Evidence, Instinct, Pattern, PatternType
+from instincts.models import Evidence, Instinct, Pattern, PatternSource, PatternType
 
 
 class TestPatternType:
@@ -454,3 +454,22 @@ class TestInstinctWithStatus:
 
         assert updated.status == "dormant"
         assert original.status == "active"  # Original unchanged
+
+
+class TestPatternSource:
+    """Tests for PatternSource enum for dual-approach detection."""
+
+    def test_has_algorithm_source(self):
+        """PatternSource should have ALGORITHM value."""
+        assert hasattr(PatternSource, "ALGORITHM")
+        assert PatternSource.ALGORITHM.value == "algorithm"
+
+    def test_has_llm_source(self):
+        """PatternSource should have LLM value."""
+        assert hasattr(PatternSource, "LLM")
+        assert PatternSource.LLM.value == "llm"
+
+    def test_has_merged_source(self):
+        """PatternSource should have MERGED value for patterns detected by both."""
+        assert hasattr(PatternSource, "MERGED")
+        assert PatternSource.MERGED.value == "merged"

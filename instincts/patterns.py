@@ -89,6 +89,29 @@ def load_observations(file_path: Path) -> list[dict[str, Any]]:
     return observations
 
 
+def load_recent_observations(
+    file_path: Path, limit: int = 1000
+) -> list[dict[str, Any]]:
+    """Load the most recent observations up to limit.
+
+    This function is used for dual-approach analysis where both algorithm
+    and LLM analyze the same latest N observations (AC-R2.3).
+
+    Args:
+        file_path: Path to the observations.jsonl file.
+        limit: Maximum number of observations to return (default: 1000).
+
+    Returns:
+        List of the most recent observation dictionaries, up to `limit` items.
+    """
+    all_observations = load_observations(file_path)
+
+    if len(all_observations) <= limit:
+        return all_observations
+
+    return all_observations[-limit:]
+
+
 def _extract_file_path(input_str: str) -> str | None:
     """Extract file_path from tool input string."""
     try:
@@ -335,16 +358,16 @@ def detect_error_resolutions(observations: list[dict[str, Any]]) -> list[Pattern
             if event != "tool_complete":
                 continue
 
-            is_error = _has_error_keywords(output)
-
-            if is_error:
+            # Track errors for later resolution detection
+            if _has_error_keywords(output):
                 recent_error = obs
                 continue
 
-            # Success after error - create pattern
+            # Skip if no recent error to resolve
             if recent_error is None:
                 continue
 
+            # Success after error - create pattern
             error_output = str(recent_error.get("output", ""))
             patterns.append(
                 _create_error_resolution_pattern(obs, session_id, error_output)

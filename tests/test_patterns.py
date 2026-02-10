@@ -484,3 +484,91 @@ class TestDetectAllPatterns:
         # Should have patterns from multiple detectors
         pattern_types = {p.pattern_type.value for p in patterns}
         assert len(pattern_types) >= 1  # At least one type detected
+
+
+class TestLoadRecentObservations:
+    """Tests for load_recent_observations function (AC-R2.3)."""
+
+    def test_loads_latest_n_observations(self, tmp_path: Path):
+        """Should return only the latest N observations when file has more."""
+        from instincts.patterns import load_recent_observations
+
+        obs_file = tmp_path / "observations.jsonl"
+        # Create 10 observations
+        observations = [
+            f'{{"event": "tool_start", "tool": "Write", "session": "s1", "idx": {i}}}'
+            for i in range(10)
+        ]
+        obs_file.write_text("\n".join(observations))
+
+        # Load only latest 5
+        result = load_recent_observations(obs_file, limit=5)
+
+        assert len(result) == 5
+        # Should be the last 5 observations (indices 5-9)
+        assert result[0]["idx"] == 5
+        assert result[4]["idx"] == 9
+
+    def test_returns_all_when_fewer_than_limit(self, tmp_path: Path):
+        """Should return all observations when file has fewer than limit."""
+        from instincts.patterns import load_recent_observations
+
+        obs_file = tmp_path / "observations.jsonl"
+        observations = [
+            '{"event": "tool_start", "tool": "Write", "session": "s1", "idx": 0}',
+            '{"event": "tool_start", "tool": "Write", "session": "s1", "idx": 1}',
+            '{"event": "tool_start", "tool": "Write", "session": "s1", "idx": 2}',
+        ]
+        obs_file.write_text("\n".join(observations))
+
+        # Request 1000 but only 3 exist
+        result = load_recent_observations(obs_file, limit=1000)
+
+        assert len(result) == 3
+
+    def test_returns_empty_for_nonexistent_file(self, tmp_path: Path):
+        """Should return empty list for nonexistent file."""
+        from instincts.patterns import load_recent_observations
+
+        result = load_recent_observations(tmp_path / "nonexistent.jsonl")
+
+        assert result == []
+
+    def test_default_limit_is_1000(self, tmp_path: Path):
+        """Should use 1000 as default limit."""
+        from instincts.patterns import load_recent_observations
+
+        obs_file = tmp_path / "observations.jsonl"
+        # Create 1500 observations
+        observations = [
+            f'{{"event": "tool_start", "tool": "Write", "session": "s1", "idx": {i}}}'
+            for i in range(1500)
+        ]
+        obs_file.write_text("\n".join(observations))
+
+        # Load with default limit
+        result = load_recent_observations(obs_file)
+
+        assert len(result) == 1000
+        # Should be observations 500-1499
+        assert result[0]["idx"] == 500
+        assert result[-1]["idx"] == 1499
+
+    def test_skips_invalid_json_lines(self, tmp_path: Path):
+        """Should skip invalid JSON lines when loading recent observations."""
+        from instincts.patterns import load_recent_observations
+
+        obs_file = tmp_path / "observations.jsonl"
+        obs_file.write_text(
+            '{"event": "tool_start", "idx": 0}\n'
+            'invalid json\n'
+            '{"event": "tool_start", "idx": 1}\n'
+            '{"event": "tool_start", "idx": 2}\n'
+        )
+
+        result = load_recent_observations(obs_file, limit=2)
+
+        # Should get last 2 valid observations (idx 1 and 2)
+        assert len(result) == 2
+        assert result[0]["idx"] == 1
+        assert result[1]["idx"] == 2
