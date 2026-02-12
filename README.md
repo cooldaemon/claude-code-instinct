@@ -2,6 +2,43 @@
 
 An Instinct-Based Learning system that observes Claude Code operations and learns patterns.
 
+## Comparison with Auto Memory
+
+Claude Code has a built-in [Auto Memory](https://code.claude.com/docs/en/memory#auto-memory) feature that remembers project patterns, debugging insights, and user preferences. This section compares it with claude-code-instinct.
+
+### Overlapping Features
+
+| Feature | Auto Memory | claude-code-instinct |
+|---------|-------------|---------------------|
+| Remember project patterns | ✅ | ✅ |
+| Remember user preferences | ✅ | ✅ |
+| Persist across sessions | ✅ | ✅ |
+| Learn workflows | ✅ | ✅ |
+
+### Unique Features of claude-code-instinct
+
+| Feature | Description |
+|---------|-------------|
+| **Confidence System** | Quantitative tracking: +0.05 on confirmation, -0.1 on contradiction, 0.02 decay per week |
+| **Systematic Pattern Detection** | Four explicit algorithms: user_corrections, error_resolutions, repeated_workflows, tool_preferences |
+| **Evolution** | Auto-generate skills/commands/agents by clustering related instincts |
+| **Evidence-Based Learning** | Quantitative thresholds: min 2 sessions, min 3 tool uses |
+
+### When to Use Which
+
+**Auto Memory is sufficient when:**
+- You just want Claude to remember patterns simply
+- You can explicitly say "remember this"
+- You don't need auto-generation of skills
+
+**claude-code-instinct adds value when:**
+- You want quantitative confidence management
+- You want "wrong learnings" to decay automatically
+- You want to auto-generate skills/commands from accumulated patterns
+- You prefer a more systematic, scientific approach
+
+> **Note**: For most users, Auto Memory is sufficient. This project is an experimental value proposition for "a more systematic learning system." As official features expand their coverage, the significance of this project may diminish.
+
 ## Installation
 
 ```bash
