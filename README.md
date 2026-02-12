@@ -27,7 +27,7 @@ make uninstall-purge
 After installation, the following commands are available in Claude Code:
 
 - `/instinct-status` - Display learned instincts
-- `/evolve` - Analyze observation data and evolve instincts
+- `/instinct-evolve` - Analyze observation data and evolve instincts
 
 ## Data Lifecycle
 
@@ -46,7 +46,7 @@ After installation, the following commands are available in Claude Code:
 │       └── *.md
 └── commands/
     ├── instinct-status.md -> [repo]/...
-    └── evolve.md -> [repo]/...
+    └── instinct-evolve.md -> [repo]/...
 ```
 
 ### Data Types
@@ -55,7 +55,7 @@ After installation, the following commands are available in Claude Code:
 |------|----------|---------|---------|
 | Observation log | `observations.jsonl` | On each tool execution | On archive |
 | Archive | `observations.archive/` | When log exceeds 10MB | On `--purge` |
-| Learned instincts | `personal/*.md` | On `/evolve` execution | On `--purge` |
+| Learned instincts | `personal/*.md` | On `/instinct-evolve` execution | On `--purge` |
 
 ### Observation Log Lifecycle
 

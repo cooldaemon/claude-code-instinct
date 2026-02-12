@@ -49,7 +49,7 @@ class TestInstallTargetDir:
         assert (instincts_dir / "bin").is_symlink()
         assert (instincts_dir / "agents").is_symlink()
         assert (target_dir / "commands" / "instinct-status.md").is_symlink()
-        assert (target_dir / "commands" / "evolve.md").is_symlink()
+        assert (target_dir / "commands" / "instinct-evolve.md").is_symlink()
 
     def test_install_creates_data_directories_in_target_dir(self, tmp_path: Path):
         """Install with --target-dir creates data directories in the specified directory."""
@@ -192,7 +192,7 @@ class TestUninstallTargetDir:
         assert not (instincts_dir / "bin").exists()
         assert not (instincts_dir / "agents").exists()
         assert not (target_dir / "commands" / "instinct-status.md").exists()
-        assert not (target_dir / "commands" / "evolve.md").exists()
+        assert not (target_dir / "commands" / "instinct-evolve.md").exists()
 
     def test_uninstall_removes_hooks_from_settings_in_target_dir(self, tmp_path: Path):
         """Uninstall with --target-dir removes hooks from settings.json in target directory."""

@@ -42,7 +42,7 @@ claude-code-instinct/
 │   ├── patterns.py         # 4 pattern detectors
 │   ├── agent.py            # Observer Agent - analyzes observations, creates instincts
 │   ├── evolution.py        # Clusters instincts, generates skills/commands/agents
-│   ├── cli.py              # CLI commands (/instinct-status, /evolve, /observe-patterns)
+│   ├── cli.py              # CLI commands (/instinct-status, /instinct-evolve)
 │   ├── observer.py         # Hook handlers - writes to observations.jsonl
 │   └── config.py           # Paths and constants
 ├── scripts/                # Install/uninstall scripts
@@ -76,7 +76,7 @@ claude-code-instinct/
 - **Pattern Detectors (patterns.py)**: 4 algorithms detecting user_corrections, error_resolutions, repeated_workflows, tool_preferences
 - **Agent (agent.py)**: Analyzes patterns, creates/updates instinct files with confidence scoring
 - **Evolution (evolution.py)**: Clusters related instincts, suggests/generates skills, commands, agents
-- **CLI (cli.py)**: Implements /instinct-status, /evolve, /observe-patterns commands
+- **CLI (cli.py)**: Implements /instinct-status, /instinct-evolve commands
 
 ### Data Flow
 ```
@@ -206,7 +206,7 @@ directory.mkdir(parents=True, exist_ok=True, mode=0o700)
 
 ### Common Issues
 - **"No observations to analyze"**: Run some Claude Code commands first to generate observations
-- **"Need at least 3 instincts"**: /evolve requires minimum instincts for meaningful analysis
+- **"Need at least 3 instincts"**: /instinct-evolve requires minimum instincts for meaningful analysis
 - **mypy errors**: Ensure all functions have type hints, use `frozen=True` on dataclasses
 
 ### Debugging

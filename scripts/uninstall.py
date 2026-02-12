@@ -46,6 +46,30 @@ def stop_observer_processes() -> None:
         warn("pgrep not found, skipping process cleanup")
 
 
+def _remove_hook_from_type(
+    hooks: dict[str, list[dict[str, object]]],
+    hook_type: str,
+    script_name: str,
+) -> bool:
+    """Remove a specific hook from a hook type. Returns True if hook was removed."""
+    if hook_type not in hooks:
+        return False
+
+    original_len = len(hooks[hook_type])
+    hooks[hook_type] = [
+        h for h in hooks[hook_type] if not is_instinct_hook(h, script_name)
+    ]
+
+    was_removed = len(hooks[hook_type]) < original_len
+    if was_removed:
+        info(f"Removed {hook_type} hook")
+
+    if not hooks[hook_type]:
+        del hooks[hook_type]
+
+    return was_removed
+
+
 def remove_hook_config(settings_path: Path) -> bool:
     """Remove hook configuration from settings.json.
 
@@ -64,43 +88,20 @@ def remove_hook_config(settings_path: Path) -> bool:
         return False
 
     hooks = settings.get("hooks", {})
-    modified = False
 
-    # Remove PreToolUse hooks
-    if "PreToolUse" in hooks:
-        original_len = len(hooks["PreToolUse"])
-        hooks["PreToolUse"] = [
-            h for h in hooks["PreToolUse"] if not is_instinct_hook(h, "observe_pre.py")
-        ]
-        if len(hooks["PreToolUse"]) < original_len:
-            info("Removed PreToolUse hook")
-            modified = True
-        if not hooks["PreToolUse"]:
-            del hooks["PreToolUse"]
-
-    # Remove PostToolUse hooks
-    if "PostToolUse" in hooks:
-        original_len = len(hooks["PostToolUse"])
-        hooks["PostToolUse"] = [
-            h
-            for h in hooks["PostToolUse"]
-            if not is_instinct_hook(h, "observe_post.py")
-        ]
-        if len(hooks["PostToolUse"]) < original_len:
-            info("Removed PostToolUse hook")
-            modified = True
-        if not hooks["PostToolUse"]:
-            del hooks["PostToolUse"]
+    pre_removed = _remove_hook_from_type(hooks, "PreToolUse", "observe_pre.py")
+    post_removed = _remove_hook_from_type(hooks, "PostToolUse", "observe_post.py")
+    modified = pre_removed or post_removed
 
     # Clean up empty hooks object
     if not hooks and "hooks" in settings:
         del settings["hooks"]
 
-    if modified:
-        return save_settings(settings_path, settings)
-    else:
+    if not modified:
         info("No instinct hooks found in settings.json")
         return True
+
+    return save_settings(settings_path, settings)
 
 
 def purge_data(instincts_dir: Path) -> bool:
@@ -157,7 +158,7 @@ def main() -> int:
         instincts_dir / "bin",
         instincts_dir / "agents",
         claude_dir / "commands" / "instinct-status.md",
-        claude_dir / "commands" / "evolve.md",
+        claude_dir / "commands" / "instinct-evolve.md",
     ]
 
     print("Stopping observer processes...")

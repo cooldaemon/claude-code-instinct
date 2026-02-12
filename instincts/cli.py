@@ -1,14 +1,13 @@
 """CLI module for Instinct-Based Learning.
 
-Provides status, evolve, and observe-patterns commands for managing instincts.
+Provides status and evolve commands for managing instincts.
 """
 
 import logging
 from collections import defaultdict
 from typing import Any
 
-from instincts.agent import analyze_observations, format_analysis_summary
-from instincts.config import ANALYSIS_PENDING_FILE, OBSERVATIONS_FILE, PERSONAL_DIR
+from instincts.config import OBSERVATIONS_FILE, PERSONAL_DIR
 from instincts.utils import normalize_trigger
 
 logger = logging.getLogger(__name__)
@@ -36,9 +35,11 @@ def _finalize_instinct(
     current: dict[str, Any], content_lines: list[str], instincts: list[dict[str, Any]]
 ) -> None:
     """Finalize current instinct and add to list if valid."""
-    if current:
-        current["content"] = "\n".join(content_lines).strip()
-        instincts.append(current)
+    if not current:
+        return
+
+    current["content"] = "\n".join(content_lines).strip()
+    instincts.append(current)
 
 
 def parse_instinct_file(content: str) -> list[dict[str, Any]]:
@@ -270,86 +271,5 @@ def cmd_evolve() -> int:
     print()
     print("=" * 60)
     print()
-
-    return 0
-
-
-MAX_PATTERNS_DISPLAY: int = 10
-
-
-def check_analysis_pending() -> bool:
-    """Check if analysis is pending (marker file exists).
-
-    Returns:
-        True if .analysis_pending marker exists, False otherwise.
-    """
-    return ANALYSIS_PENDING_FILE.exists()
-
-
-def delete_analysis_pending() -> None:
-    """Delete the analysis pending marker file if it exists."""
-    try:
-        ANALYSIS_PENDING_FILE.unlink(missing_ok=True)
-    except OSError as e:
-        # Log permission errors but don't fail
-        logger.debug("Could not delete analysis marker: %s", e)
-
-
-def _has_observations_to_analyze() -> bool:
-    """Check if there are observations available for analysis."""
-    if not OBSERVATIONS_FILE.exists():
-        return False
-    return OBSERVATIONS_FILE.stat().st_size > 0
-
-
-def _print_no_observations_message() -> None:
-    """Print message when no observations are available."""
-    print("No observations to analyze.")
-    print(f"\nObservations file: {OBSERVATIONS_FILE}")
-
-
-def _print_detected_patterns(patterns: tuple[Any, ...]) -> None:
-    """Print detected patterns with details."""
-    print("## DETECTED PATTERNS\n")
-    for i, pattern in enumerate(patterns[:MAX_PATTERNS_DISPLAY], 1):
-        print(f"{i}. {pattern.pattern_type.value}: {pattern.description}")
-        print(f"   Trigger: {pattern.trigger}")
-        print(f"   Domain: {pattern.domain}")
-        print(f"   Evidence: {len(pattern.evidence)} observations")
-        print()
-
-    remaining = len(patterns) - MAX_PATTERNS_DISPLAY
-    if remaining > 0:
-        print(f"   ... and {remaining} more patterns")
-        print()
-
-
-def cmd_observe_patterns(dry_run: bool = False, skip_llm: bool = False) -> int:
-    """Analyze observations and detect patterns.
-
-    Args:
-        dry_run: If True, show what would be created without writing files.
-        skip_llm: If True, skip LLM analysis even when API key is available.
-
-    Returns:
-        Exit code (0 for success).
-    """
-    if not _has_observations_to_analyze():
-        _print_no_observations_message()
-        # Still delete marker if it exists (edge case: marker exists but no observations)
-        delete_analysis_pending()
-        return 0
-
-    if dry_run:
-        print("DRY RUN - No files will be created\n")
-
-    result = analyze_observations(dry_run=dry_run, skip_llm=skip_llm)
-    print(format_analysis_summary(result))
-
-    if result.patterns:
-        _print_detected_patterns(result.patterns)
-
-    # Delete the analysis pending marker after analysis completes (AC-R1.5)
-    delete_analysis_pending()
 
     return 0

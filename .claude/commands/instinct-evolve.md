@@ -1,11 +1,11 @@
-# /evolve
+# /instinct-evolve
 
 Analyze learned instincts and suggest evolutions into skills, commands, or agents.
 
 ## Usage
 
 ```
-/evolve
+/instinct-evolve
 ```
 
 ## What it does

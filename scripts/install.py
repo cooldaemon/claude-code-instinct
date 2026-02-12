@@ -40,6 +40,38 @@ def create_data_directories(claude_dir: Path) -> None:
         info(f"Created directory: {d}")
 
 
+def _create_hook_config(script_name: str, claude_dir: Path) -> dict[str, object]:
+    """Create a hook configuration dictionary."""
+    return {
+        "matcher": "*",
+        "hooks": [
+            {
+                "type": "command",
+                "command": get_hook_command(script_name, claude_dir),
+            }
+        ],
+    }
+
+
+def _add_hook_if_missing(
+    hooks: dict[str, list[dict[str, object]]],
+    hook_type: str,
+    script_name: str,
+    hook_config: dict[str, object],
+) -> None:
+    """Add a hook to settings if not already present."""
+    if hook_type not in hooks:
+        hooks[hook_type] = []
+
+    hook_exists = any(is_instinct_hook(h, script_name) for h in hooks[hook_type])
+    if hook_exists:
+        info(f"{hook_type} hook already exists")
+        return
+
+    hooks[hook_type].append(hook_config)
+    info(f"Added {hook_type} hook")
+
+
 def merge_hook_config(settings_path: Path, claude_dir: Path) -> bool:
     """Merge hook configuration into settings.json.
 
@@ -54,53 +86,16 @@ def merge_hook_config(settings_path: Path, claude_dir: Path) -> bool:
     if settings is None:
         return False
 
-    pre_hook = {
-        "matcher": "*",
-        "hooks": [
-            {
-                "type": "command",
-                "command": get_hook_command("observe_pre.py", claude_dir),
-            }
-        ],
-    }
-    post_hook = {
-        "matcher": "*",
-        "hooks": [
-            {
-                "type": "command",
-                "command": get_hook_command("observe_post.py", claude_dir),
-            }
-        ],
-    }
-
     if "hooks" not in settings:
         settings["hooks"] = {}
 
     hooks = settings["hooks"]
 
-    # Add PreToolUse hook
-    if "PreToolUse" not in hooks:
-        hooks["PreToolUse"] = []
+    pre_hook = _create_hook_config("observe_pre.py", claude_dir)
+    post_hook = _create_hook_config("observe_post.py", claude_dir)
 
-    pre_exists = any(is_instinct_hook(h, "observe_pre.py") for h in hooks["PreToolUse"])
-    if not pre_exists:
-        hooks["PreToolUse"].append(pre_hook)
-        info("Added PreToolUse hook")
-    else:
-        info("PreToolUse hook already exists")
-
-    # Add PostToolUse hook
-    if "PostToolUse" not in hooks:
-        hooks["PostToolUse"] = []
-
-    post_exists = any(
-        is_instinct_hook(h, "observe_post.py") for h in hooks["PostToolUse"]
-    )
-    if not post_exists:
-        hooks["PostToolUse"].append(post_hook)
-        info("Added PostToolUse hook")
-    else:
-        info("PostToolUse hook already exists")
+    _add_hook_if_missing(hooks, "PreToolUse", "observe_pre.py", pre_hook)
+    _add_hook_if_missing(hooks, "PostToolUse", "observe_post.py", post_hook)
 
     return save_settings(settings_path, settings)
 
@@ -144,8 +139,8 @@ def main() -> int:
             claude_dir / "commands" / "instinct-status.md",
         ),
         (
-            repo_root / ".claude" / "commands" / "evolve.md",
-            claude_dir / "commands" / "evolve.md",
+            repo_root / ".claude" / "commands" / "instinct-evolve.md",
+            claude_dir / "commands" / "instinct-evolve.md",
         ),
     ]
 
@@ -174,7 +169,7 @@ def main() -> int:
     print()
     print("Usage:")
     print("  /instinct-status  - Show learned instincts")
-    print("  /evolve           - Analyze and evolve instincts")
+    print("  /instinct-evolve  - Analyze and evolve instincts")
     print()
     print("Observations will be logged to:")
     print(f"  {instincts_dir / 'observations.jsonl'}")

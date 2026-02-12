@@ -8,7 +8,6 @@ Use Haiku for efficiency (runs frequently in background).
 
 ## Trigger
 
-- Manually via `/observe-patterns`
 - Automatically after N observations (configurable)
 
 ## Input
