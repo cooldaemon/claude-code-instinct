@@ -4,19 +4,24 @@ Handles PreToolUse and PostToolUse hooks from Claude Code,
 writing observations to a JSONL file.
 """
 
+import fcntl
 import json
+import os
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from instincts.auto_learn import should_trigger_learning, trigger_background_analysis
 from instincts.config import (
     ANALYSIS_MIN_COUNT,
-    ANALYSIS_PENDING_FILE,
+    ANALYSIS_TRIGGER_CHECK_INTERVAL,
     ANALYSIS_TRIGGER_COUNT,
     ANALYSIS_TRIGGER_HOURS,
-    ARCHIVE_DIR,
-    INSTINCTS_DIR,
-    OBSERVATIONS_FILE,
+    get_analysis_pending_file,
+    get_archive_dir,
+    get_observations_file,
+    get_project_instincts_dir,
 )
 
 # Maximum file size before archiving (in MB)
@@ -25,11 +30,35 @@ MAX_FILE_SIZE_MB: int = 10
 # Maximum length for input/output strings
 MAX_CONTENT_LENGTH: int = 5000
 
-# Check analysis trigger every N observations (performance optimization)
-ANALYSIS_TRIGGER_CHECK_INTERVAL: int = 10
+# Thread-local storage for observation counter (CR-001: thread safety)
 
-# Counter for observations to reduce file reads
-_observation_counter: int = 0
+_observation_storage = threading.local()
+
+
+def get_observation_counter() -> int:
+    """Get the current observation counter value (thread-safe).
+
+    Returns:
+        Current counter value for this thread.
+    """
+    return getattr(_observation_storage, "counter", 0)
+
+
+def increment_observation_counter() -> int:
+    """Increment the observation counter (thread-safe).
+
+    Returns:
+        New counter value after increment.
+    """
+    current = get_observation_counter()
+    new_value = current + 1
+    _observation_storage.counter = new_value
+    return new_value
+
+
+def reset_observation_counter() -> None:
+    """Reset the observation counter to zero (thread-safe)."""
+    _observation_storage.counter = 0
 
 
 def _truncate(value: Any, max_length: int = MAX_CONTENT_LENGTH) -> str:
@@ -49,11 +78,16 @@ def _get_file_size_mb(path: Path) -> float:
 
 
 def _archive_if_needed(observations_file: Path, archive_dir: Path) -> None:
-    """Archive observations file if it exceeds MAX_FILE_SIZE_MB."""
+    """Archive observations file if it exceeds MAX_FILE_SIZE_MB.
+
+    Uses unique timestamp + PID for archive filename to prevent race conditions
+    when multiple processes attempt to archive simultaneously.
+    """
     if _get_file_size_mb(observations_file) >= MAX_FILE_SIZE_MB:
         archive_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
-        archive_path = archive_dir / f"observations-{timestamp}.jsonl"
+        # Include PID in filename to prevent race condition with concurrent archives
+        archive_path = archive_dir / f"observations-{timestamp}-{os.getpid()}.jsonl"
         try:
             observations_file.rename(archive_path)
         except FileNotFoundError:
@@ -61,17 +95,47 @@ def _archive_if_needed(observations_file: Path, archive_dir: Path) -> None:
             pass
 
 
-def _write_observation(observation: dict[str, Any]) -> None:
-    """Write an observation to the observations file."""
-    # Ensure directory exists with restrictive permissions
-    INSTINCTS_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+def _append_observation_with_lock(
+    observation: dict[str, Any], observations_file: Path
+) -> None:
+    """Append an observation to a file with exclusive file locking.
 
-    # Archive if needed
-    _archive_if_needed(OBSERVATIONS_FILE, ARCHIVE_DIR)
+    Uses fcntl.LOCK_EX to prevent race conditions when multiple Claude Code
+    sessions write to the same file simultaneously.
 
-    # Append observation
-    with OBSERVATIONS_FILE.open("a") as f:
-        f.write(json.dumps(observation) + "\n")
+    Args:
+        observation: The observation data to write.
+        observations_file: Path to the observations JSONL file.
+    """
+    with observations_file.open("a") as f:
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+        try:
+            f.write(json.dumps(observation) + "\n")
+            f.flush()
+        finally:
+            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+
+
+def _write_observation_to_project(
+    observation: dict[str, Any], project_root: Path
+) -> None:
+    """Write an observation to the project's observations file.
+
+    Uses file locking to prevent race conditions when multiple Claude Code
+    sessions write to the same file simultaneously.
+
+    Args:
+        observation: The observation data to write.
+        project_root: Path to the project root.
+    """
+    instincts_dir = get_project_instincts_dir(project_root)
+    instincts_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+
+    observations_file = get_observations_file(project_root)
+    archive_dir = get_archive_dir(project_root)
+
+    _archive_if_needed(observations_file, archive_dir)
+    _append_observation_with_lock(observation, observations_file)
 
 
 def _extract_field(data: dict[str, Any], primary: str, fallback: str) -> Any:
@@ -79,7 +143,7 @@ def _extract_field(data: dict[str, Any], primary: str, fallback: str) -> Any:
     return data.get(primary, data.get(fallback, ""))
 
 
-def observe_pre(hook_data: dict[str, Any]) -> None:
+def observe_pre(hook_data: dict[str, Any], project_root: Path) -> None:
     """Process PreToolUse hook.
 
     Extracts tool information and writes a tool_start event.
@@ -90,6 +154,7 @@ def observe_pre(hook_data: dict[str, Any]) -> None:
             - tool_name or tool: Name of the tool
             - tool_input or input: Input parameters
             - session_id: Session identifier
+        project_root: Project root for project-scoped storage.
     """
     tool_name = _extract_field(hook_data, "tool_name", "tool")
     tool_input = _extract_field(hook_data, "tool_input", "input")
@@ -103,10 +168,10 @@ def observe_pre(hook_data: dict[str, Any]) -> None:
         "input": _truncate(tool_input),
     }
 
-    _write_observation(observation)
+    _write_observation_to_project(observation, project_root)
 
 
-def observe_post(hook_data: dict[str, Any]) -> None:
+def observe_post(hook_data: dict[str, Any], project_root: Path) -> None:
     """Process PostToolUse hook.
 
     Extracts tool output and writes a tool_complete event.
@@ -117,6 +182,7 @@ def observe_post(hook_data: dict[str, Any]) -> None:
             - tool_name or tool: Name of the tool
             - tool_output or output: Output from the tool
             - session_id: Session identifier
+        project_root: Project root for project-scoped storage.
     """
     tool_name = _extract_field(hook_data, "tool_name", "tool")
     tool_output = _extract_field(hook_data, "tool_output", "output")
@@ -130,14 +196,14 @@ def observe_post(hook_data: dict[str, Any]) -> None:
         "output": _truncate(tool_output),
     }
 
-    _write_observation(observation)
+    _write_observation_to_project(observation, project_root)
 
-    # Check if analysis should be triggered (only every N observations for performance)
-    global _observation_counter
-    _observation_counter += 1
-    if _observation_counter >= ANALYSIS_TRIGGER_CHECK_INTERVAL:
-        _observation_counter = 0
-        _check_analysis_trigger()
+    # Check auto-learning trigger for project-scoped storage
+    counter = increment_observation_counter()
+    if counter >= ANALYSIS_TRIGGER_CHECK_INTERVAL:
+        reset_observation_counter()
+        if should_trigger_learning(project_root):
+            trigger_background_analysis(project_root)
 
 
 def count_observations(file_path: Path) -> int:
@@ -187,17 +253,23 @@ def get_oldest_observation_timestamp(file_path: Path) -> datetime | None:
     return None
 
 
-def _should_trigger_analysis() -> bool:
-    """Check if analysis should be triggered.
+def should_trigger_analysis(project_root: Path) -> bool:
+    """Check if analysis should be triggered for a project.
+
+    Args:
+        project_root: Path to the project root.
 
     Returns:
         True if analysis should be triggered based on count or time.
     """
+    analysis_pending_file = get_analysis_pending_file(project_root)
+    observations_file = get_observations_file(project_root)
+
     # Don't trigger if marker already exists
-    if ANALYSIS_PENDING_FILE.exists():
+    if analysis_pending_file.exists():
         return False
 
-    obs_count = count_observations(OBSERVATIONS_FILE)
+    obs_count = count_observations(observations_file)
 
     # Trigger if count reached threshold
     if obs_count >= ANALYSIS_TRIGGER_COUNT:
@@ -208,7 +280,7 @@ def _should_trigger_analysis() -> bool:
         return False
 
     # Check if enough time has elapsed
-    oldest_ts = get_oldest_observation_timestamp(OBSERVATIONS_FILE)
+    oldest_ts = get_oldest_observation_timestamp(observations_file)
     if not oldest_ts:
         return False
 
@@ -216,34 +288,44 @@ def _should_trigger_analysis() -> bool:
     return elapsed >= timedelta(hours=ANALYSIS_TRIGGER_HOURS)
 
 
-def _create_analysis_marker() -> None:
+def create_analysis_marker(project_root: Path) -> None:
     """Create the analysis pending marker file atomically.
 
     Uses exclusive file creation to avoid race conditions when multiple
     processes try to create the marker simultaneously.
+
+    Args:
+        project_root: Path to the project root.
     """
+    analysis_pending_file = get_analysis_pending_file(project_root)
+    observations_file = get_observations_file(project_root)
+
     # Ensure parent directory exists
-    ANALYSIS_PENDING_FILE.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    analysis_pending_file.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
 
     # Check for symlink attack
-    if ANALYSIS_PENDING_FILE.is_symlink():
+    if analysis_pending_file.is_symlink():
         return
 
     # Write marker with timestamp using exclusive create (atomic)
     marker_data = {
         "created_at": datetime.now(timezone.utc).isoformat(),
-        "observation_count": count_observations(OBSERVATIONS_FILE),
+        "observation_count": count_observations(observations_file),
     }
     try:
         # Use 'x' mode for exclusive creation - fails if file already exists
-        with ANALYSIS_PENDING_FILE.open("x") as f:
+        with analysis_pending_file.open("x") as f:
             f.write(json.dumps(marker_data))
     except FileExistsError:
         # Another process already created the marker - this is fine
         pass
 
 
-def _check_analysis_trigger() -> None:
-    """Check and create analysis trigger marker if needed."""
-    if _should_trigger_analysis():
-        _create_analysis_marker()
+def check_analysis_trigger(project_root: Path) -> None:
+    """Check and create analysis trigger marker if needed.
+
+    Args:
+        project_root: Path to the project root.
+    """
+    if should_trigger_analysis(project_root):
+        create_analysis_marker(project_root)

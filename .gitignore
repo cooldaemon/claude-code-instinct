@@ -56,3 +56,4 @@ docs/plans/
 
 # Claude Code local settings
 .claude/settings.local.json
+docs/code-reviews/

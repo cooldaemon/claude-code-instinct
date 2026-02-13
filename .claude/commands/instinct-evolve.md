@@ -1,6 +1,6 @@
 # /instinct-evolve
 
-Analyze learned instincts and suggest evolutions into skills, commands, or agents.
+Transform learned instincts into permanent artifacts.
 
 ## Usage
 
@@ -10,56 +10,95 @@ Analyze learned instincts and suggest evolutions into skills, commands, or agent
 
 ## What it does
 
-1. Analyzes all instincts in `~/.claude/instincts/personal/`
-2. Identifies high-confidence instincts (>=80%)
-3. Finds clusters of related instincts
-4. Suggests potential evolutions:
-   - **Skills**: Clusters of related instincts
-   - **Commands**: Workflow instincts with high confidence
-   - **Agents**: Complex multi-step patterns
+1. Loads learned instincts from `<project>/docs/instincts/learned/`
+2. Displays instincts with confidence levels
+3. Prompts for instinct selection
+4. Prompts for output type selection
+5. For non-CLAUDE.md outputs, prompts for scope (project or global)
+6. Generates and writes the selected artifact
 
 ## Implementation
 
-Run the instinct CLI evolve command:
+Run the instinct CLI evolve command with interactive mode:
 
 ```bash
-~/.claude/instincts/bin/instinct_cli.py evolve
+~/.claude/instincts/bin/instinct_cli.py evolve --interactive
 ```
 
 ## Requirements
 
 - At least 3 instincts are required for meaningful analysis
+- Project must have `docs/instincts/learned/` directory with instinct files
 
-## Example Output
+## Interactive Flow
 
 ```
-============================================================
-  EVOLVE ANALYSIS - 8 instincts
-============================================================
+/instinct-evolve
 
-High confidence instincts (>=80%): 3
+Available instincts:
+  1. [code-style] Use explicit return types (85%)
+  2. [workflow] Run make check before committing (90%)
+  3. [testing] Use pytest fixtures in conftest.py (78%)
 
-Potential skill clusters found: 2
+Select instincts (e.g., 1,2,3 or 'all'):
+> all
 
-## SKILL CANDIDATES
+Select output type:
+  1. CLAUDE.md (append to project file)
+  2. Rules (.claude/rules/)
+  3. Skills (.claude/skills/)
+  4. Subagents (.claude/agents/)
+  5. Commands (.claude/commands/)
+> 1
 
-1. Cluster: "new functions"
-   Instincts: 3
-   Avg confidence: 85%
-   Domains: code-style, testing
+Preview of CLAUDE.md changes:
+----------------------------------------
+## Learned Patterns
 
-2. Cluster: "error handling"
-   Instincts: 2
-   Avg confidence: 72%
-   Domains: code-style
+### Code Style
+- Use explicit return types when writing TypeScript functions
 
-============================================================
+### Workflow
+- Run make check before committing to ensure code quality
+...
+----------------------------------------
+
+Apply changes? [y/n]
+> y
+
+Written to CLAUDE.md
 ```
 
-## Evolution Types
+## Output Types
 
-| Type | Description | Output Location |
-|------|-------------|-----------------|
-| Skill | Reusable patterns | `~/.claude/skills/` |
-| Command | Custom slash commands | `~/.claude/commands/` |
-| Agent | Specialist agents | `~/.claude/agents/` |
+| Type | Description | Project Location | Global Location |
+|------|-------------|------------------|-----------------|
+| CLAUDE.md | Project-specific rules | `CLAUDE.md` | N/A |
+| Rules | Reusable rule files | `.claude/rules/` | `~/.claude/rules/` |
+| Skills | Skill definitions | `.claude/skills/` | `~/.claude/skills/` |
+| Subagents | Custom agent definitions | `.claude/agents/` | `~/.claude/agents/` |
+| Commands | Slash command definitions | `.claude/commands/` | `~/.claude/commands/` |
+
+## Scope Selection
+
+For Rules, Skills, Subagents, and Commands, you can choose:
+
+1. **Project scope** - Files are created in the project's `.claude/` directory
+2. **Global scope** - Files are created in `~/.claude/` for use across all projects
+
+CLAUDE.md output is always project-scoped.
+
+## Automatic Learning
+
+Note: Instincts are created automatically when enough observations are collected.
+You don't need to run any command to trigger learning - it happens automatically
+after 50+ tool usages with a 5-minute cooldown between analysis runs.
+
+## Viewing Learned Instincts
+
+Learned instincts are stored as markdown files in:
+```
+<project>/docs/instincts/learned/
+```
+
+You can view them directly in your file browser or editor.

@@ -4,18 +4,26 @@ This module provides the evolution system that:
 - Clusters related instincts by domain and trigger
 - Evaluates clusters for evolution into skills/commands/agents
 - Generates skill, command, and agent files
+- Recommends optimal output types for instinct evolution
+
+Output Type Recommendation Logic:
+1. Workflow patterns with <= 10 lines -> Commands (subagent calls)
+2. Workflow patterns with > 10 lines -> Subagents (complex multi-step)
+3. Checklist/table format content -> Rules
+4. High evidence count (>= 5) -> Skills (domain knowledge)
+5. Default (simple patterns) -> CLAUDE.md (project-specific rules)
 """
 
-import os
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
+from instincts.claudemd import generate_patterns_content, insert_patterns
 from instincts.config import (
-    EVOLVED_AGENTS_DIR,
-    EVOLVED_COMMANDS_DIR,
-    EVOLVED_SKILLS_DIR,
+    EvolutionOutputType,
+    EvolutionScope,
+    get_evolved_output_dir,
 )
 from instincts.models import Instinct
 
@@ -26,6 +34,10 @@ MIN_CONFIDENCE_FOR_COMMAND: float = 0.85
 
 # Trigger similarity threshold for clustering instincts
 TRIGGER_SIMILARITY_THRESHOLD: float = 0.3
+
+# Thresholds for output type recommendation
+WORKFLOW_LINE_THRESHOLD: int = 10  # Lines above this suggest subagent
+MIN_EVIDENCE_FOR_SKILL: int = 5  # Evidence count threshold for skills
 
 
 @dataclass(frozen=True)
@@ -61,15 +73,32 @@ class EvolutionSuggestion:
 
 
 def _extract_trigger_keywords(trigger: str) -> set[str]:
-    """Extract keywords from a trigger string."""
-    # Remove common words and extract meaningful keywords
+    """Extract meaningful keywords from a trigger string.
+
+    Filters out common stop words and short words to identify
+    key terms for trigger similarity comparison.
+
+    Args:
+        trigger: The trigger string to extract keywords from.
+
+    Returns:
+        Set of lowercase keywords.
+    """
     stop_words = {"when", "the", "a", "an", "to", "for", "of", "in", "on", "is", "are"}
     words = trigger.lower().split()
     return {w for w in words if w not in stop_words and len(w) > 2}
 
 
 def _trigger_similarity(trigger1: str, trigger2: str) -> float:
-    """Calculate similarity between two triggers based on keyword overlap."""
+    """Calculate Jaccard similarity between two triggers based on keyword overlap.
+
+    Args:
+        trigger1: First trigger string.
+        trigger2: Second trigger string.
+
+    Returns:
+        Similarity score between 0.0 and 1.0 (Jaccard index).
+    """
     keywords1 = _extract_trigger_keywords(trigger1)
     keywords2 = _extract_trigger_keywords(trigger2)
 
@@ -85,7 +114,14 @@ def _trigger_similarity(trigger1: str, trigger2: str) -> float:
 def _group_instincts_by_domain(
     instincts: list[Instinct],
 ) -> dict[str, list[Instinct]]:
-    """Group instincts by their domain."""
+    """Group instincts by their domain.
+
+    Args:
+        instincts: List of instincts to group.
+
+    Returns:
+        Dictionary mapping domain names to lists of instincts.
+    """
     by_domain: dict[str, list[Instinct]] = {}
     for instinct in instincts:
         domain = instinct.domain
@@ -98,7 +134,15 @@ def _group_instincts_by_domain(
 def _calculate_cluster_trigger_pattern(
     cluster_instincts: list[Instinct], default: str
 ) -> str:
-    """Calculate a trigger pattern from common keywords in cluster instincts."""
+    """Calculate a trigger pattern from common keywords in cluster instincts.
+
+    Args:
+        cluster_instincts: List of instincts in the cluster.
+        default: Default pattern to return if no keywords found.
+
+    Returns:
+        Space-separated string of up to 3 common keywords, or the default.
+    """
     max_keywords = 3
     all_keywords: set[str] = set()
     for inst in cluster_instincts:
@@ -116,7 +160,17 @@ def _find_similar_instincts(
     used_indices: set[int],
     start_index: int,
 ) -> list[Instinct]:
-    """Find instincts similar to seed based on trigger similarity."""
+    """Find instincts similar to seed based on trigger similarity.
+
+    Args:
+        seed_instinct: The seed instinct to compare against.
+        candidates: List of candidate instincts to search.
+        used_indices: Set of indices already assigned to clusters (modified in-place).
+        start_index: Index of the seed instinct in candidates.
+
+    Returns:
+        List of similar instincts including the seed.
+    """
     similar = [seed_instinct]
     used_indices.add(start_index)
 
@@ -135,7 +189,15 @@ def _find_similar_instincts(
 def _create_cluster_from_instincts(
     domain: str, cluster_instincts: list[Instinct]
 ) -> Cluster:
-    """Create a Cluster object from a list of instincts."""
+    """Create a Cluster object from a list of instincts.
+
+    Args:
+        domain: The domain for the cluster.
+        cluster_instincts: List of instincts to include in the cluster.
+
+    Returns:
+        Cluster object with calculated average confidence and trigger pattern.
+    """
     avg_conf = sum(inst.confidence for inst in cluster_instincts) / len(
         cluster_instincts
     )
@@ -205,9 +267,79 @@ def evaluate_cluster_for_evolution(cluster: Cluster) -> EvolutionSuggestion | No
 MULTI_STEP_INDICATORS: tuple[str, ...] = ("1.", "2.", "3.", "step", "then", "->")
 WORKFLOW_SOURCES: tuple[str, ...] = ("repeated_workflow", "pattern-detection")
 
+# Patterns for detecting checklist and table content
+CHECKBOX_PATTERN = re.compile(r"^\s*-\s*\[[x ]\]", re.MULTILINE | re.IGNORECASE)
+TABLE_PATTERN = re.compile(r"^\s*\|[^|]+\|[^|]+\|", re.MULTILINE)
+
+
+def has_checklist_or_table(content: str) -> bool:
+    """Check if content contains checklist (checkbox) or table format.
+
+    Args:
+        content: The content to check.
+
+    Returns:
+        True if content contains checkbox list (- [ ] or - [x]) or markdown table.
+    """
+    # Check for checkbox list pattern
+    if CHECKBOX_PATTERN.search(content):
+        return True
+
+    # Check for markdown table pattern
+    if TABLE_PATTERN.search(content):
+        return True
+
+    return False
+
+
+def recommend_output_type(instinct: Instinct) -> EvolutionOutputType:
+    """Recommend the best output type for evolving an instinct.
+
+    The recommendation logic follows these priorities:
+    1. Workflow patterns with few lines -> Commands (subagent calls)
+    2. Workflow patterns with many lines -> Subagents (complex multi-step)
+    3. Checklist/table format -> Rules
+    4. High evidence count -> Skills (domain knowledge)
+    5. Default -> CLAUDE.md (simple project rules)
+
+    Args:
+        instinct: The instinct to analyze.
+
+    Returns:
+        Recommended EvolutionOutputType.
+    """
+    content_lines = len(instinct.content.split("\n"))
+
+    # CR-008: Combined workflow source check with else clause
+    if instinct.source in WORKFLOW_SOURCES:
+        # Multi-step workflow with few lines -> Commands (subagent call)
+        if content_lines <= WORKFLOW_LINE_THRESHOLD:
+            return EvolutionOutputType.COMMANDS
+        # Complex workflow with many lines -> Subagents
+        else:
+            return EvolutionOutputType.SUBAGENTS
+
+    # Checklist/table format -> Rules
+    if has_checklist_or_table(instinct.content):
+        return EvolutionOutputType.RULES
+
+    # Rich domain knowledge (high evidence) -> Skills
+    if instinct.evidence_count >= MIN_EVIDENCE_FOR_SKILL:
+        return EvolutionOutputType.SKILLS
+
+    # Simple rules -> CLAUDE.md
+    return EvolutionOutputType.CLAUDEMD
+
 
 def _has_multi_step_workflow(content: str) -> bool:
-    """Check if content suggests a multi-step workflow."""
+    """Check if content suggests a multi-step workflow.
+
+    Args:
+        content: The content to check.
+
+    Returns:
+        True if content contains indicators like numbered steps or "then".
+    """
     content_lower = content.lower()
     return any(indicator in content_lower for indicator in MULTI_STEP_INDICATORS)
 
@@ -241,8 +373,27 @@ def suggest_evolution_for_instinct(instinct: Instinct) -> EvolutionSuggestion | 
     )
 
 
+def _generate_skill_name(domain: str) -> str:
+    """Generate a kebab-case skill name from domain.
+
+    Args:
+        domain: The domain name.
+
+    Returns:
+        Kebab-case formatted skill name.
+    """
+    return domain.lower().replace(" ", "-").replace("_", "-")
+
+
 def generate_skill(cluster: Cluster) -> str:
     """Generate skill file content from a cluster of instincts.
+
+    Format follows reference from ~/.claude/skills/*/SKILL.md:
+    - YAML frontmatter with name and description
+    - description: "[What it does]. Use when [trigger]."
+    - "## When to Apply" section
+    - "## Guidance" section
+    - "## Anti-patterns" section
 
     Args:
         cluster: The cluster to generate a skill from.
@@ -250,7 +401,7 @@ def generate_skill(cluster: Cluster) -> str:
     Returns:
         Skill file content as a string.
     """
-    now = datetime.now(timezone.utc).isoformat()
+    skill_name = _generate_skill_name(cluster.domain)
 
     # Collect all guidance from instincts
     guidance_points: list[str] = []
@@ -261,7 +412,7 @@ def generate_skill(cluster: Cluster) -> str:
             lines = inst.content.split("\n")
             for line in lines:
                 line = line.strip()
-                if line and not line.startswith("#") and len(line) > 20:
+                if line and not line.startswith("#") and len(line) > 10:
                     guidance_points.append(f"- {line}")
                     break
 
@@ -272,16 +423,15 @@ def generate_skill(cluster: Cluster) -> str:
         else "- Follow learned patterns for this domain"
     )
 
-    # Build source instincts section
-    source_instincts = "\n".join(
-        f"- {inst.id} (confidence: {inst.confidence:.0%})"
-        for inst in cluster.instincts
-    )
+    # Build description for frontmatter
+    description = f"{cluster.domain.title()} patterns learned from observations. Use when {cluster.trigger_pattern}."
 
-    content = f"""# {cluster.domain.title()} Skill
+    content = f"""---
+name: {skill_name}
+description: "{description}"
+---
 
-Generated from {len(cluster.instincts)} learned instincts.
-Average confidence: {cluster.avg_confidence:.0%}
+# {cluster.domain.title()} Skill
 
 ## When to Apply
 
@@ -291,19 +441,36 @@ Average confidence: {cluster.avg_confidence:.0%}
 
 {guidance_section}
 
-## Source Instincts
+## Anti-patterns
 
-{source_instincts}
-
----
-Generated: {now}
+- Avoid inconsistent patterns within this domain
+- Do not ignore learned conventions
 """
 
     return content
 
 
+def _generate_command_name(instinct_id: str) -> str:
+    """Generate a kebab-case command name from instinct ID.
+
+    Args:
+        instinct_id: The instinct ID.
+
+    Returns:
+        Kebab-case formatted command name.
+    """
+    return instinct_id.lower().replace("_", "-")
+
+
 def generate_command(instinct: Instinct) -> str:
     """Generate command file content from an instinct.
+
+    Format follows reference from ~/.claude/commands/:
+    - YAML frontmatter with description
+    - "I'll use the X subagent" pattern
+    - Prerequisites section
+    - Next Commands section
+    - Very short (~20 lines)
 
     Args:
         instinct: The instinct to generate a command from.
@@ -311,31 +478,51 @@ def generate_command(instinct: Instinct) -> str:
     Returns:
         Command file content as a string.
     """
-    now = datetime.now(timezone.utc).isoformat()
+    command_name = _generate_command_name(instinct.id)
+    agent_name = command_name.replace("-workflow", "").replace("-", "-")
 
-    content = f"""# {instinct.trigger.title()}
-
-A command generated from a learned workflow pattern.
-
-## Usage
-
-When: {instinct.trigger}
-
-## Action
-
-{instinct.content}
-
+    content = f"""---
+description: "{instinct.trigger.capitalize()} using a learned workflow pattern."
 ---
-Source instinct: {instinct.id}
-Confidence: {instinct.confidence:.0%}
-Generated: {now}
+
+I'll use the {agent_name} subagent to handle this process.
+
+The {agent_name} subagent will:
+- {instinct.content}
+
+## Prerequisites
+- Required context available
+
+## Next Commands
+After completion:
+- Continue with next workflow step
 """
 
     return content
 
 
+def _generate_agent_name(instinct_id: str) -> str:
+    """Generate a kebab-case agent name from instinct ID.
+
+    Args:
+        instinct_id: The instinct ID.
+
+    Returns:
+        Kebab-case formatted agent name with '-workflow' suffix removed.
+    """
+    name = instinct_id.lower().replace("_", "-")
+    if name.endswith("-workflow"):
+        name = name[:-9]  # Remove "-workflow" suffix
+    return name
+
+
 def generate_agent(instinct: Instinct) -> str:
     """Generate agent file content from a complex workflow instinct.
+
+    Format follows reference from ~/.claude/agents/:
+    - YAML frontmatter with name, description, tools, skills
+    - "## Process Flow" with numbered steps
+    - Clear activation conditions
 
     Args:
         instinct: The instinct to generate an agent from.
@@ -343,17 +530,18 @@ def generate_agent(instinct: Instinct) -> str:
     Returns:
         Agent file content as a string.
     """
-    now = datetime.now(timezone.utc).isoformat()
+    agent_name = _generate_agent_name(instinct.id)
 
-    content = f"""# {instinct.trigger.title()} Agent
+    content = f"""---
+name: {agent_name}
+description: {instinct.trigger.capitalize()}
+tools: Bash, Read, Grep, Glob
+skills: []
+---
 
-An agent generated from a learned multi-step workflow pattern.
+You are an expert {agent_name} specialist. Handle this workflow professionally.
 
-## Purpose
-
-{instinct.trigger}
-
-## Workflow
+## Process Flow
 
 {instinct.content}
 
@@ -361,11 +549,11 @@ An agent generated from a learned multi-step workflow pattern.
 
 This agent activates when: {instinct.trigger}
 
----
-Source instinct: {instinct.id}
-Confidence: {instinct.confidence:.0%}
-Evidence count: {instinct.evidence_count}
-Generated: {now}
+## When to Ask User
+
+Only ask for help if:
+- Error is unclear or ambiguous
+- Fix requires decisions outside this workflow
 """
 
     return content
@@ -380,38 +568,23 @@ def _sanitize_filename(name: str) -> str:
     Returns:
         A safe filename-compatible string.
     """
-    # Get just the basename to prevent path traversal
-    safe_name = os.path.basename(name)
-    # Defense in depth: handle edge cases where basename may not fully sanitize
-    # (e.g., different OS path conventions, unusual characters)
+    from instincts.utils import sanitize_id
 
-    # Remove dangerous characters, keep only alphanumeric, dash, underscore, dot
-    safe_name = re.sub(r"[^a-zA-Z0-9_.-]", "-", safe_name)
-
-    # Remove leading/trailing dashes and collapse multiple dashes
-    safe_name = re.sub(r"-+", "-", safe_name).strip("-")
-
-    # Ensure we have a valid filename
-    if not safe_name:
-        safe_name = "unnamed"
-
-    return safe_name
-
-
-def _get_evolution_directory(evolution_type: str) -> Path:
-    """Get the directory for a given evolution type."""
-    directory_map = {
-        "skill": EVOLVED_SKILLS_DIR,
-        "command": EVOLVED_COMMANDS_DIR,
-        "agent": EVOLVED_AGENTS_DIR,
-    }
-    return directory_map.get(evolution_type, EVOLVED_AGENTS_DIR)
+    return sanitize_id(name, allow_dots=True)
 
 
 def _get_evolved_filename(
     evolution_type: str, source: Cluster | Instinct
 ) -> str:
-    """Generate filename for an evolved file."""
+    """Generate filename for an evolved file.
+
+    Args:
+        evolution_type: Type of evolution ("skill", "command", "agent").
+        source: The source Cluster or Instinct.
+
+    Returns:
+        Sanitized filename with appropriate suffix.
+    """
     if evolution_type == "skill":
         if isinstance(source, Cluster):
             base_name = _sanitize_filename(source.domain.lower().replace(" ", "-"))
@@ -441,27 +614,21 @@ def _validate_file_path(file_path: Path, directory: Path) -> None:
         raise ValueError("Path traversal detected")
 
 
-def write_evolved_file(
-    evolution_type: str,
-    source: Cluster | Instinct,
+def _write_evolved_file_to_dir(
+    directory: Path,
+    filename: str,
     content: str,
 ) -> Path:
-    """Write an evolved file to the appropriate directory.
+    """Write an evolved file to a specific directory.
 
     Args:
-        evolution_type: Type of evolution ("skill", "command", "agent").
-        source: The source Cluster or Instinct.
+        directory: Directory to write to.
+        filename: Name of the file.
         content: The file content to write.
 
     Returns:
         Path to the created file.
-
-    Raises:
-        ValueError: If the resulting path would be outside the directory or is a symlink.
     """
-    directory = _get_evolution_directory(evolution_type)
-    filename = _get_evolved_filename(evolution_type, source)
-
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
 
     file_path = directory / filename
@@ -469,3 +636,174 @@ def write_evolved_file(
 
     file_path.write_text(content)
     return file_path
+
+
+def _generate_rule_content(instinct: Instinct) -> str:
+    """Generate rule file content from an instinct.
+
+    Format follows reference from ~/.claude/rules/:
+    - No YAML frontmatter (just title)
+    - "## When to Apply" section
+    - "## Checklist" or "## Guidelines" section
+    - May include tables for patterns
+    """
+    # Convert content to checklist format if not already
+    content_lines = instinct.content.strip().split("\n")
+    checklist_items: list[str] = []
+    for line in content_lines:
+        line = line.strip()
+        if line and not line.startswith("#"):
+            # Convert to checklist item if not already
+            if line.startswith("- [ ]") or line.startswith("- [x]"):
+                checklist_items.append(line)
+            elif line.startswith("- "):
+                checklist_items.append(f"- [ ] {line[2:]}")
+            else:
+                checklist_items.append(f"- [ ] {line}")
+
+    checklist_section = "\n".join(checklist_items) if checklist_items else f"- [ ] {instinct.content}"
+
+    return f"""# {instinct.trigger.title()}
+
+## When to Apply
+
+{instinct.trigger}
+
+## Checklist
+
+{checklist_section}
+"""
+
+
+def evolve_to_rules(
+    instincts: list[Instinct],
+    scope: EvolutionScope,
+    project_root: Path,
+) -> list[Path]:
+    """Evolve instincts to rule files.
+
+    Args:
+        instincts: List of instincts to evolve.
+        scope: Scope of the output (project or global).
+        project_root: Path to the project root.
+
+    Returns:
+        List of paths to created rule files.
+    """
+    directory = get_evolved_output_dir(EvolutionOutputType.RULES, scope, project_root)
+    created_files: list[Path] = []
+
+    for instinct in instincts:
+        content = _generate_rule_content(instinct)
+        filename = f"{_sanitize_filename(instinct.id)}.md"
+        file_path = _write_evolved_file_to_dir(directory, filename, content)
+        created_files.append(file_path)
+
+    return created_files
+
+
+def evolve_to_skills(
+    instincts: list[Instinct],
+    scope: EvolutionScope,
+    project_root: Path,
+) -> list[Path]:
+    """Evolve instincts to skill files.
+
+    Args:
+        instincts: List of instincts to evolve.
+        scope: Scope of the output (project or global).
+        project_root: Path to the project root.
+
+    Returns:
+        List of paths to created skill files.
+    """
+    directory = get_evolved_output_dir(EvolutionOutputType.SKILLS, scope, project_root)
+    created_files: list[Path] = []
+
+    # Group by domain for better organization
+    by_domain: dict[str, list[Instinct]] = {}
+    for inst in instincts:
+        if inst.domain not in by_domain:
+            by_domain[inst.domain] = []
+        by_domain[inst.domain].append(inst)
+
+    for domain, domain_instincts in by_domain.items():
+        cluster = _create_cluster_from_instincts(domain, domain_instincts)
+        content = generate_skill(cluster)
+        filename = f"{_sanitize_filename(domain)}-skill.md"
+        file_path = _write_evolved_file_to_dir(directory, filename, content)
+        created_files.append(file_path)
+
+    return created_files
+
+
+def evolve_to_subagents(
+    instincts: list[Instinct],
+    scope: EvolutionScope,
+    project_root: Path,
+) -> list[Path]:
+    """Evolve instincts to subagent files.
+
+    Args:
+        instincts: List of instincts to evolve.
+        scope: Scope of the output (project or global).
+        project_root: Path to the project root.
+
+    Returns:
+        List of paths to created subagent files.
+    """
+    directory = get_evolved_output_dir(EvolutionOutputType.SUBAGENTS, scope, project_root)
+    created_files: list[Path] = []
+
+    for instinct in instincts:
+        content = generate_agent(instinct)
+        filename = f"{_sanitize_filename(instinct.id)}-agent.md"
+        file_path = _write_evolved_file_to_dir(directory, filename, content)
+        created_files.append(file_path)
+
+    return created_files
+
+
+def evolve_to_commands(
+    instincts: list[Instinct],
+    scope: EvolutionScope,
+    project_root: Path,
+) -> list[Path]:
+    """Evolve instincts to command files.
+
+    Args:
+        instincts: List of instincts to evolve.
+        scope: Scope of the output (project or global).
+        project_root: Path to the project root.
+
+    Returns:
+        List of paths to created command files.
+    """
+    directory = get_evolved_output_dir(EvolutionOutputType.COMMANDS, scope, project_root)
+    created_files: list[Path] = []
+
+    for instinct in instincts:
+        content = generate_command(instinct)
+        filename = f"{_sanitize_filename(instinct.id)}-command.md"
+        file_path = _write_evolved_file_to_dir(directory, filename, content)
+        created_files.append(file_path)
+
+    return created_files
+
+
+def evolve_to_claudemd(
+    instincts: list[Instinct],
+    project_root: Path,
+) -> str:
+    """Evolve instincts to CLAUDE.md content.
+
+    Args:
+        instincts: List of instincts to evolve.
+        project_root: Path to the project root.
+
+    Returns:
+        Preview of the CLAUDE.md content with patterns added.
+    """
+    claudemd_path = project_root / "CLAUDE.md"
+    patterns_content = generate_patterns_content(instincts)
+    return insert_patterns(claudemd_path, patterns_content)

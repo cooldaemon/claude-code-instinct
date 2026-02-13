@@ -48,11 +48,12 @@ class TestInstallTargetDir:
         instincts_dir = target_dir / "instincts"
         assert (instincts_dir / "bin").is_symlink()
         assert (instincts_dir / "agents").is_symlink()
-        assert (target_dir / "commands" / "instinct-status.md").is_symlink()
+        # instinct-status.md is removed (US-8)
+        assert not (target_dir / "commands" / "instinct-status.md").exists()
         assert (target_dir / "commands" / "instinct-evolve.md").is_symlink()
 
-    def test_install_creates_data_directories_in_target_dir(self, tmp_path: Path):
-        """Install with --target-dir creates data directories in the specified directory."""
+    def test_install_does_not_create_data_directories_in_target_dir(self, tmp_path: Path):
+        """Install with --target-dir should not create data directories (project-scoped storage)."""
         # Arrange
         target_dir = tmp_path / ".claude"
         target_dir.mkdir(parents=True)
@@ -74,8 +75,9 @@ class TestInstallTargetDir:
         assert result.returncode == 0, f"Install failed: {result.stderr}"
 
         instincts_dir = target_dir / "instincts"
-        assert (instincts_dir / "personal").is_dir()
-        assert (instincts_dir / "observations.archive").is_dir()
+        # With project-scoped storage, personal and archive directories are not created
+        assert not (instincts_dir / "personal").exists()
+        assert not (instincts_dir / "observations.archive").exists()
 
     def test_install_merges_hooks_into_settings_in_target_dir(self, tmp_path: Path):
         """Install with --target-dir merges hooks into settings.json in target directory."""
@@ -191,7 +193,7 @@ class TestUninstallTargetDir:
         assert result.returncode == 0, f"Uninstall failed: {result.stderr}"
         assert not (instincts_dir / "bin").exists()
         assert not (instincts_dir / "agents").exists()
-        assert not (target_dir / "commands" / "instinct-status.md").exists()
+        # instinct-status.md is removed (US-8) - was never created
         assert not (target_dir / "commands" / "instinct-evolve.md").exists()
 
     def test_uninstall_removes_hooks_from_settings_in_target_dir(self, tmp_path: Path):
@@ -243,8 +245,8 @@ class TestUninstallTargetDir:
             and "PostToolUse" not in settings.get("hooks", {})
         )
 
-    def test_uninstall_preserves_data_directories_without_purge(self, tmp_path: Path):
-        """Uninstall without --purge preserves data directories."""
+    def test_uninstall_preserves_instincts_directory_without_purge(self, tmp_path: Path):
+        """Uninstall without --purge preserves instincts directory structure."""
         # Arrange - First install to target directory
         target_dir = tmp_path / ".claude"
         target_dir.mkdir(parents=True)
@@ -265,8 +267,9 @@ class TestUninstallTargetDir:
 
         instincts_dir = target_dir / "instincts"
 
-        # Create a file in personal directory to verify preservation
-        test_file = instincts_dir / "personal" / "test.md"
+        # Create a test file in instincts directory to verify preservation
+        # Note: personal/ is no longer created by install, so we create a test file directly
+        test_file = instincts_dir / "test.md"
         test_file.write_text("test content")
 
         # Act
@@ -283,7 +286,8 @@ class TestUninstallTargetDir:
 
         # Assert
         assert result.returncode == 0, f"Uninstall failed: {result.stderr}"
-        assert (instincts_dir / "personal").is_dir()
+        # instincts directory should still exist (for bin/agents symlinks)
+        # but data files should be preserved
         assert test_file.exists()
 
     def test_uninstall_with_purge_removes_data_directories(self, tmp_path: Path):
@@ -335,6 +339,193 @@ class TestUninstallTargetDir:
         args = parser.parse_args([])
 
         assert args.target_dir == Path.home() / ".claude"
+
+
+class TestProjectScopedStorage:
+    """Tests for project-scoped storage changes (AC-8.1, AC-8.2, AC-8.3)."""
+
+    def test_install_does_not_create_personal_directory(self, tmp_path: Path):
+        """AC-8.3: Install SHOULD NOT create ~/.claude/instincts/personal/ directory."""
+        # Arrange
+        target_dir = tmp_path / ".claude"
+        target_dir.mkdir(parents=True)
+        repo_root = get_repo_root()
+
+        # Act
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(repo_root / "scripts" / "install.py"),
+                "--target-dir",
+                str(target_dir),
+            ],
+            capture_output=True,
+            text=True,
+        )
+
+        # Assert
+        assert result.returncode == 0, f"Install failed: {result.stderr}"
+
+        instincts_dir = target_dir / "instincts"
+        assert not (instincts_dir / "personal").exists()
+
+    def test_install_does_not_create_evolved_directory(self, tmp_path: Path):
+        """AC-8.1: Install SHOULD NOT create ~/.claude/instincts/evolved/ directory."""
+        # Arrange
+        target_dir = tmp_path / ".claude"
+        target_dir.mkdir(parents=True)
+        repo_root = get_repo_root()
+
+        # Act
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(repo_root / "scripts" / "install.py"),
+                "--target-dir",
+                str(target_dir),
+            ],
+            capture_output=True,
+            text=True,
+        )
+
+        # Assert
+        assert result.returncode == 0, f"Install failed: {result.stderr}"
+
+        instincts_dir = target_dir / "instincts"
+        assert not (instincts_dir / "evolved").exists()
+
+    def test_install_does_not_create_observations_file(self, tmp_path: Path):
+        """AC-8.2: Install SHOULD NOT create ~/.claude/instincts/observations.jsonl."""
+        # Arrange
+        target_dir = tmp_path / ".claude"
+        target_dir.mkdir(parents=True)
+        repo_root = get_repo_root()
+
+        # Act
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(repo_root / "scripts" / "install.py"),
+                "--target-dir",
+                str(target_dir),
+            ],
+            capture_output=True,
+            text=True,
+        )
+
+        # Assert
+        assert result.returncode == 0, f"Install failed: {result.stderr}"
+
+        instincts_dir = target_dir / "instincts"
+        assert not (instincts_dir / "observations.jsonl").exists()
+
+    def test_install_does_not_create_observations_archive_directory(self, tmp_path: Path):
+        """Install SHOULD NOT create ~/.claude/instincts/observations.archive/ directory."""
+        # Arrange
+        target_dir = tmp_path / ".claude"
+        target_dir.mkdir(parents=True)
+        repo_root = get_repo_root()
+
+        # Act
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(repo_root / "scripts" / "install.py"),
+                "--target-dir",
+                str(target_dir),
+            ],
+            capture_output=True,
+            text=True,
+        )
+
+        # Assert
+        assert result.returncode == 0, f"Install failed: {result.stderr}"
+
+        instincts_dir = target_dir / "instincts"
+        assert not (instincts_dir / "observations.archive").exists()
+
+    def test_install_message_does_not_mention_instinct_status(self, tmp_path: Path):
+        """Install message should not mention /instinct-status (command removed)."""
+        # Arrange
+        target_dir = tmp_path / ".claude"
+        target_dir.mkdir(parents=True)
+        repo_root = get_repo_root()
+
+        # Act
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(repo_root / "scripts" / "install.py"),
+                "--target-dir",
+                str(target_dir),
+            ],
+            capture_output=True,
+            text=True,
+        )
+
+        # Assert
+        assert result.returncode == 0, f"Install failed: {result.stderr}"
+        assert "/instinct-status" not in result.stdout
+
+    def test_uninstall_message_mentions_project_scoped_data(self, tmp_path: Path):
+        """Uninstall message should mention project-scoped data."""
+        # Arrange
+        target_dir = tmp_path / ".claude"
+        target_dir.mkdir(parents=True)
+        repo_root = get_repo_root()
+
+        # Install first
+        subprocess.run(
+            [
+                sys.executable,
+                str(repo_root / "scripts" / "install.py"),
+                "--target-dir",
+                str(target_dir),
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+
+        # Act
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(repo_root / "scripts" / "uninstall.py"),
+                "--target-dir",
+                str(target_dir),
+            ],
+            capture_output=True,
+            text=True,
+        )
+
+        # Assert
+        assert result.returncode == 0, f"Uninstall failed: {result.stderr}"
+        # Should mention project-scoped data
+        assert "project" in result.stdout.lower() or "docs/instincts" in result.stdout
+
+    def test_install_does_not_create_instinct_status_symlink(self, tmp_path: Path):
+        """Install should not create instinct-status.md symlink (command removed)."""
+        # Arrange
+        target_dir = tmp_path / ".claude"
+        target_dir.mkdir(parents=True)
+        repo_root = get_repo_root()
+
+        # Act
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(repo_root / "scripts" / "install.py"),
+                "--target-dir",
+                str(target_dir),
+            ],
+            capture_output=True,
+            text=True,
+        )
+
+        # Assert
+        assert result.returncode == 0, f"Install failed: {result.stderr}"
+        assert not (target_dir / "commands" / "instinct-status.md").exists()
 
 
 class TestInstallUninstallIdempotency:

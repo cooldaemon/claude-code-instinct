@@ -22,22 +22,9 @@ from scripts.utils import (
 )
 
 
-def create_data_directories(claude_dir: Path) -> None:
-    """Create data directories that should persist.
-
-    Args:
-        claude_dir: Base claude directory (e.g., ~/.claude/)
-    """
-    instincts_dir = claude_dir / "instincts"
-
-    dirs = [
-        instincts_dir / "personal",
-        instincts_dir / "observations.archive",
-    ]
-
-    for d in dirs:
-        d.mkdir(parents=True, exist_ok=True)
-        info(f"Created directory: {d}")
+# NOTE: create_data_directories has been removed (AC-8.1, AC-8.2, AC-8.3)
+# With project-scoped storage, observations and learned instincts are stored per-project
+# in <project>/docs/instincts/ rather than globally in ~/.claude/instincts/
 
 
 def _create_hook_config(script_name: str, claude_dir: Path) -> dict[str, object]:
@@ -134,10 +121,7 @@ def main() -> int:
     symlinks = [
         (repo_root / ".claude" / "instincts" / "bin", instincts_dir / "bin"),
         (repo_root / ".claude" / "instincts" / "agents", instincts_dir / "agents"),
-        (
-            repo_root / ".claude" / "commands" / "instinct-status.md",
-            claude_dir / "commands" / "instinct-status.md",
-        ),
+        # NOTE: instinct-status.md removed (US-8)
         (
             repo_root / ".claude" / "commands" / "instinct-evolve.md",
             claude_dir / "commands" / "instinct-evolve.md",
@@ -153,10 +137,6 @@ def main() -> int:
             return 1
 
     print()
-    print("Creating data directories...")
-    create_data_directories(claude_dir)
-
-    print()
     print("Configuring hooks...")
     settings_path = claude_dir / "settings.json"
     if not merge_hook_config(settings_path, claude_dir):
@@ -168,11 +148,13 @@ def main() -> int:
     print("=" * 60)
     print()
     print("Usage:")
-    print("  /instinct-status  - Show learned instincts")
-    print("  /instinct-evolve  - Analyze and evolve instincts")
+    print("  /instinct-evolve  - Evolve learned instincts into rules/skills/commands")
     print()
-    print("Observations will be logged to:")
-    print(f"  {instincts_dir / 'observations.jsonl'}")
+    print("Observations and learned instincts are stored per-project in:")
+    print("  <project>/docs/instincts/")
+    print()
+    print("Note: Learning happens automatically when enough observations")
+    print("are collected (50+ tool usages).")
     print()
 
     return 0

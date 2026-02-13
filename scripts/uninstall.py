@@ -26,24 +26,35 @@ from scripts.utils import (
 
 def stop_observer_processes() -> None:
     """Stop any running observer processes."""
+    # CR-009: Add timeout to prevent hanging on unresponsive processes
+    SUBPROCESS_TIMEOUT_SECONDS: int = 5
     try:
         result = subprocess.run(
             ["pgrep", "-f", "observe_pre.py|observe_post.py|instinct_cli.py"],
             capture_output=True,
             text=True,
+            timeout=SUBPROCESS_TIMEOUT_SECONDS,
         )
         if result.returncode == 0 and result.stdout.strip():
             pids = result.stdout.strip().split("\n")
             for pid in pids:
                 try:
-                    subprocess.run(["kill", pid], check=True)
+                    subprocess.run(
+                        ["kill", pid],
+                        check=True,
+                        timeout=SUBPROCESS_TIMEOUT_SECONDS,
+                    )
                     info(f"Stopped observer process: {pid}")
                 except subprocess.CalledProcessError:
                     warn(f"Failed to stop process: {pid}")
+                except subprocess.TimeoutExpired:
+                    warn(f"Timeout stopping process: {pid}")
         else:
             info("No observer processes running")
     except FileNotFoundError:
         warn("pgrep not found, skipping process cleanup")
+    except subprocess.TimeoutExpired:
+        warn("Timeout finding observer processes, skipping cleanup")
 
 
 def _remove_hook_from_type(
@@ -157,7 +168,7 @@ def main() -> int:
     symlinks = [
         instincts_dir / "bin",
         instincts_dir / "agents",
-        claude_dir / "commands" / "instinct-status.md",
+        # NOTE: instinct-status.md removed (US-8)
         claude_dir / "commands" / "instinct-evolve.md",
     ]
 
@@ -189,11 +200,13 @@ def main() -> int:
     print()
 
     if not args.purge:
-        print("Note: Data files were preserved at:")
-        print(f"  {instincts_dir}")
+        print("Note: Global symlinks have been removed.")
         print()
-        print("To remove all data, run:")
-        print("  ./uninstall --purge")
+        print("Project-scoped data (observations, learned instincts) is stored in:")
+        print("  <project>/docs/instincts/")
+        print()
+        print("To remove project data, delete the docs/instincts/ directory")
+        print("in each project where you used claude-code-instinct.")
         print()
 
     return 0

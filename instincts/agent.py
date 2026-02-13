@@ -10,6 +10,7 @@ This module provides the Observer Agent that:
 import logging
 import os
 import re
+import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -20,7 +21,11 @@ from instincts.confidence import (
     calculate_initial_confidence,
     check_dormant_status,
 )
-from instincts.config import MAX_OBSERVATIONS_FOR_ANALYSIS, OBSERVATIONS_FILE, PERSONAL_DIR
+from instincts.config import (
+    MAX_OBSERVATIONS_FOR_ANALYSIS,
+    get_learned_dir,
+    get_observations_file,
+)
 from instincts.llm_patterns import detect_patterns_with_llm, is_llm_available
 from instincts.models import Instinct, Pattern
 from instincts.pattern_merger import merge_patterns
@@ -138,22 +143,38 @@ def _sanitize_instinct_id(instinct_id: str) -> str:
     Returns:
         A safe filename-compatible string.
     """
-    # Get just the basename to prevent path traversal
-    safe_id = os.path.basename(instinct_id)
-    # Defense in depth: handle edge cases where basename may not fully sanitize
-    # (e.g., different OS path conventions, unusual characters)
+    from instincts.utils import sanitize_id
 
-    # Remove dangerous characters, keep only alphanumeric, dash, underscore
-    safe_id = re.sub(r"[^a-zA-Z0-9_-]", "-", safe_id)
+    result = sanitize_id(instinct_id, allow_dots=False)
+    # Preserve backward-compatible default for empty instinct IDs
+    return result if result != "unnamed" else "unnamed-instinct"
 
-    # Remove leading/trailing dashes and collapse multiple dashes
-    safe_id = re.sub(r"-+", "-", safe_id).strip("-")
 
-    # Ensure we have a valid filename
-    if not safe_id:
-        safe_id = "unnamed-instinct"
+def _atomic_write_text(file_path: Path, content: str) -> None:
+    """Write file atomically using temp file + rename.
 
-    return safe_id
+    This prevents file corruption if the process crashes mid-write.
+
+    Args:
+        file_path: Path to the file to write.
+        content: Content to write.
+
+    Raises:
+        OSError: If write or rename fails.
+    """
+    directory = file_path.parent
+    fd, temp_path = tempfile.mkstemp(dir=directory, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(content)
+        os.rename(temp_path, file_path)
+    except Exception:
+        # Clean up temp file on failure
+        try:
+            os.unlink(temp_path)
+        except OSError:
+            pass
+        raise
 
 
 def _write_instinct_file(instinct: Instinct, directory: Path) -> Path:
@@ -213,7 +234,8 @@ status: "{safe_status}"
 {instinct.content}
 """
 
-    file_path.write_text(content)
+    # Use atomic write to prevent corruption on crash
+    _atomic_write_text(file_path, content)
     return file_path
 
 
@@ -334,7 +356,11 @@ def _parse_instinct_file(content: str, source_file: str) -> Instinct | None:
     )
 
 
-def analyze_observations(dry_run: bool = False, skip_llm: bool = False) -> AnalysisResult:
+def analyze_observations(
+    project_root: Path,
+    dry_run: bool = False,
+    skip_llm: bool = False,
+) -> AnalysisResult:
     """Analyze observations and create/update instincts.
 
     Uses dual-approach detection when LLM is available:
@@ -343,6 +369,7 @@ def analyze_observations(dry_run: bool = False, skip_llm: bool = False) -> Analy
     - Results are merged using pattern_merger
 
     Args:
+        project_root: Project root for project-scoped storage.
         dry_run: If True, don't write any files.
         skip_llm: If True, skip LLM analysis even when API key is available.
 
@@ -352,20 +379,23 @@ def analyze_observations(dry_run: bool = False, skip_llm: bool = False) -> Analy
     warnings: list[str] = []
     detection_sources: list[str] = ["algorithm"]
 
+    instincts_dir = get_learned_dir(project_root)
+    observations_file = get_observations_file(project_root)
+
     # Load existing instincts once - reused for LLM context and duplicate checking
-    existing_instincts = _load_existing_instincts(PERSONAL_DIR)
+    existing_instincts = _load_existing_instincts(instincts_dir)
     existing_ids = {inst.id for inst in existing_instincts}
 
     # Check for too many instinct files (EC-4)
     if len(existing_instincts) >= MAX_INSTINCT_FILES_WARNING:
         warnings.append(
-            f"Warning: {len(existing_instincts)} instinct files in personal/ - "
+            f"Warning: {len(existing_instincts)} instinct files in learned/ - "
             "this may impact performance"
         )
 
     # Load recent observations for analysis (AC-R2.3)
     observations = load_recent_observations(
-        OBSERVATIONS_FILE, limit=MAX_OBSERVATIONS_FOR_ANALYSIS
+        observations_file, limit=MAX_OBSERVATIONS_FOR_ANALYSIS
     )
 
     if not observations:
@@ -379,7 +409,7 @@ def analyze_observations(dry_run: bool = False, skip_llm: bool = False) -> Analy
         )
 
     # Algorithm-based pattern detection (always runs)
-    algorithm_patterns = detect_all_patterns(OBSERVATIONS_FILE)
+    algorithm_patterns = detect_all_patterns(observations_file)
 
     # LLM-based pattern detection (AC-R2.1, AC-R2.2)
     llm_patterns: list[Pattern] = []
@@ -423,7 +453,7 @@ def analyze_observations(dry_run: bool = False, skip_llm: bool = False) -> Analy
                 instincts_updated += 1
             else:
                 # Create new instinct
-                _write_instinct_file(instinct, PERSONAL_DIR)
+                _write_instinct_file(instinct, instincts_dir)
                 instincts_created += 1
                 existing_ids.add(instinct.id)
 
@@ -437,18 +467,15 @@ def analyze_observations(dry_run: bool = False, skip_llm: bool = False) -> Analy
     )
 
 
-def apply_confidence_decay(directory: Path | None = None) -> list[Instinct]:
+def apply_confidence_decay(directory: Path) -> list[Instinct]:
     """Apply confidence decay to all existing instincts.
 
     Args:
-        directory: Directory containing instinct files (defaults to PERSONAL_DIR).
+        directory: Directory containing instinct files.
 
     Returns:
         List of instincts with updated confidence.
     """
-    if directory is None:
-        directory = PERSONAL_DIR
-
     instincts = _load_existing_instincts(directory)
     decayed_instincts: list[Instinct] = []
 

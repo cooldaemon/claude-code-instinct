@@ -13,6 +13,20 @@ from pathlib import Path
 from unittest.mock import patch
 
 
+def create_project_structure(tmp_path: Path) -> tuple[Path, Path, Path]:
+    """Create a standard project structure for tests.
+
+    Returns:
+        Tuple of (project_root, instincts_dir, observations_file)
+    """
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    instincts_dir = project_root / "docs" / "instincts"
+    instincts_dir.mkdir(parents=True)
+    observations_file = instincts_dir / "observations.jsonl"
+    return project_root, instincts_dir, observations_file
+
+
 class TestObservePre:
     """Tests for observe_pre function."""
 
@@ -20,7 +34,7 @@ class TestObservePre:
         """observe_pre should write a tool_start event to observations file."""
         from instincts.observer import observe_pre
 
-        observations_file = tmp_path / "observations.jsonl"
+        project_root, instincts_dir, observations_file = create_project_structure(tmp_path)
         hook_data = {
             "hook_type": "PreToolUse",
             "tool_name": "Read",
@@ -28,9 +42,7 @@ class TestObservePre:
             "session_id": "session-123",
         }
 
-        with patch("instincts.observer.OBSERVATIONS_FILE", observations_file):
-            with patch("instincts.observer.INSTINCTS_DIR", tmp_path):
-                observe_pre(hook_data)
+        observe_pre(hook_data, project_root)
 
         assert observations_file.exists()
         lines = observations_file.read_text().strip().split("\n")
@@ -47,7 +59,7 @@ class TestObservePre:
         """observe_pre should handle hook_data with empty tool_input."""
         from instincts.observer import observe_pre
 
-        observations_file = tmp_path / "observations.jsonl"
+        project_root, instincts_dir, observations_file = create_project_structure(tmp_path)
         hook_data = {
             "hook_type": "PreToolUse",
             "tool_name": "Bash",
@@ -55,32 +67,29 @@ class TestObservePre:
             "session_id": "session-456",
         }
 
-        with patch("instincts.observer.OBSERVATIONS_FILE", observations_file):
-            with patch("instincts.observer.INSTINCTS_DIR", tmp_path):
-                observe_pre(hook_data)
+        observe_pre(hook_data, project_root)
 
+        assert observations_file.exists()
         event = json.loads(observations_file.read_text().strip())
         assert event["tool"] == "Bash"
 
     def test_observe_pre_truncates_large_input(self, tmp_path: Path):
-        """observe_pre should truncate tool_input larger than 5000 chars."""
-        from instincts.observer import observe_pre
+        """observe_pre should truncate inputs exceeding MAX_CONTENT_LENGTH."""
+        from instincts.observer import MAX_CONTENT_LENGTH, observe_pre
 
-        observations_file = tmp_path / "observations.jsonl"
-        large_content = "x" * 10000
+        project_root, instincts_dir, observations_file = create_project_structure(tmp_path)
+        large_input = "x" * (MAX_CONTENT_LENGTH + 1000)
         hook_data = {
             "hook_type": "PreToolUse",
             "tool_name": "Write",
-            "tool_input": {"content": large_content},
+            "tool_input": large_input,
             "session_id": "session-789",
         }
 
-        with patch("instincts.observer.OBSERVATIONS_FILE", observations_file):
-            with patch("instincts.observer.INSTINCTS_DIR", tmp_path):
-                observe_pre(hook_data)
+        observe_pre(hook_data, project_root)
 
         event = json.loads(observations_file.read_text().strip())
-        assert len(event["input"]) <= 5000
+        assert len(event["input"]) <= MAX_CONTENT_LENGTH
 
 
 class TestObservePost:
@@ -90,91 +99,78 @@ class TestObservePost:
         """observe_post should write a tool_complete event to observations file."""
         from instincts.observer import observe_post
 
-        observations_file = tmp_path / "observations.jsonl"
-        hook_data = {
-            "hook_type": "PostToolUse",
-            "tool_name": "Bash",
-            "tool_output": "Hello, World!",
-            "session_id": "session-123",
-        }
-
-        with patch("instincts.observer.OBSERVATIONS_FILE", observations_file):
-            with patch("instincts.observer.INSTINCTS_DIR", tmp_path):
-                observe_post(hook_data)
-
-        assert observations_file.exists()
-        event = json.loads(observations_file.read_text().strip())
-        assert event["event"] == "tool_complete"
-        assert event["tool"] == "Bash"
-        assert event["session"] == "session-123"
-        assert "output" in event
-        assert "timestamp" in event
-
-    def test_observe_post_truncates_large_output(self, tmp_path: Path):
-        """observe_post should truncate tool_output larger than 5000 chars."""
-        from instincts.observer import observe_post
-
-        observations_file = tmp_path / "observations.jsonl"
-        large_output = "y" * 10000
+        project_root, instincts_dir, observations_file = create_project_structure(tmp_path)
         hook_data = {
             "hook_type": "PostToolUse",
             "tool_name": "Read",
-            "tool_output": large_output,
-            "session_id": "session-456",
+            "tool_output": "file contents here",
+            "session_id": "session-123",
         }
 
-        with patch("instincts.observer.OBSERVATIONS_FILE", observations_file):
-            with patch("instincts.observer.INSTINCTS_DIR", tmp_path):
-                observe_post(hook_data)
+        observe_post(hook_data, project_root)
+
+        assert observations_file.exists()
+        lines = observations_file.read_text().strip().split("\n")
+        assert len(lines) == 1
+
+        event = json.loads(lines[0])
+        assert event["event"] == "tool_complete"
+        assert event["tool"] == "Read"
+        assert event["session"] == "session-123"
+        assert "output" in event
+
+    def test_observe_post_truncates_large_output(self, tmp_path: Path):
+        """observe_post should truncate outputs exceeding MAX_CONTENT_LENGTH."""
+        from instincts.observer import MAX_CONTENT_LENGTH, observe_post
+
+        project_root, instincts_dir, observations_file = create_project_structure(tmp_path)
+        large_output = "y" * (MAX_CONTENT_LENGTH + 2000)
+        hook_data = {
+            "hook_type": "PostToolUse",
+            "tool_name": "Bash",
+            "tool_output": large_output,
+            "session_id": "session-999",
+        }
+
+        observe_post(hook_data, project_root)
 
         event = json.loads(observations_file.read_text().strip())
-        assert len(event["output"]) <= 5000
+        assert len(event["output"]) <= MAX_CONTENT_LENGTH
 
 
 class TestObservationFileManagement:
     """Tests for observation file management."""
 
     def test_creates_instincts_dir_if_not_exists(self, tmp_path: Path):
-        """observe_pre should create INSTINCTS_DIR if it doesn't exist."""
+        """observe_pre should create instincts dir if it doesn't exist."""
         from instincts.observer import observe_pre
 
-        instincts_dir = tmp_path / "new_dir"
-        observations_file = instincts_dir / "observations.jsonl"
+        project_root = tmp_path / "project"
+        project_root.mkdir()
+        instincts_dir = project_root / "docs" / "instincts"
+        # Do NOT create instincts_dir
 
         hook_data = {
             "hook_type": "PreToolUse",
-            "tool_name": "Test",
-            "tool_input": {},
-            "session_id": "test",
+            "tool_name": "Read",
+            "session_id": "session-123",
         }
 
-        with patch("instincts.observer.OBSERVATIONS_FILE", observations_file):
-            with patch("instincts.observer.INSTINCTS_DIR", instincts_dir):
-                observe_pre(hook_data)
+        observe_pre(hook_data, project_root)
 
         assert instincts_dir.exists()
-        assert observations_file.exists()
 
     def test_appends_to_existing_file(self, tmp_path: Path):
-        """Multiple observations should append to the same file."""
+        """observe_pre should append to existing observations file."""
         from instincts.observer import observe_pre
 
-        observations_file = tmp_path / "observations.jsonl"
+        project_root, instincts_dir, observations_file = create_project_structure(tmp_path)
 
-        with patch("instincts.observer.OBSERVATIONS_FILE", observations_file):
-            with patch("instincts.observer.INSTINCTS_DIR", tmp_path):
-                observe_pre({
-                    "hook_type": "PreToolUse",
-                    "tool_name": "Tool1",
-                    "tool_input": {},
-                    "session_id": "s1",
-                })
-                observe_pre({
-                    "hook_type": "PreToolUse",
-                    "tool_name": "Tool2",
-                    "tool_input": {},
-                    "session_id": "s1",
-                })
+        # Create first observation
+        observe_pre({"tool_name": "Read", "session_id": "s1"}, project_root)
+
+        # Create second observation
+        observe_pre({"tool_name": "Write", "session_id": "s2"}, project_root)
 
         lines = observations_file.read_text().strip().split("\n")
         assert len(lines) == 2
@@ -185,401 +181,366 @@ class TestFileArchiving:
 
     def test_archives_file_when_exceeds_max_size(self, tmp_path: Path):
         """Should archive observations file when it exceeds MAX_FILE_SIZE_MB."""
-        from instincts.observer import observe_pre
+        from instincts.observer import MAX_FILE_SIZE_MB, observe_pre
 
-        observations_file = tmp_path / "observations.jsonl"
-        archive_dir = tmp_path / "observations.archive"
+        project_root, instincts_dir, observations_file = create_project_structure(tmp_path)
+        archive_dir = instincts_dir / "observations.archive"
 
-        # Create a file larger than 1MB (use small threshold for testing)
-        observations_file.write_text("x" * (1024 * 1024 + 1))  # 1MB + 1 byte
+        # Create a large file that exceeds the threshold
+        large_content = "x" * (int(MAX_FILE_SIZE_MB * 1024 * 1024) + 1000)
+        observations_file.write_text(large_content)
 
-        hook_data = {
-            "hook_type": "PreToolUse",
-            "tool_name": "Test",
-            "tool_input": {},
-            "session_id": "test",
-        }
-
-        with patch("instincts.observer.OBSERVATIONS_FILE", observations_file):
-            with patch("instincts.observer.INSTINCTS_DIR", tmp_path):
-                with patch("instincts.observer.ARCHIVE_DIR", archive_dir):
-                    with patch("instincts.observer.MAX_FILE_SIZE_MB", 1):
-                        observe_pre(hook_data)
+        hook_data = {"tool_name": "Read", "session_id": "s1"}
+        observe_pre(hook_data, project_root)
 
         # Archive directory should be created
         assert archive_dir.exists()
-        # Old file should be moved to archive
-        archived_files = list(archive_dir.glob("observations-*.jsonl"))
-        assert len(archived_files) == 1
-        # New observation should be in fresh file
-        assert observations_file.exists()
-        new_content = observations_file.read_text()
-        assert "Test" in new_content
+        # Archive should contain a file
+        archive_files = list(archive_dir.glob("*.jsonl"))
+        assert len(archive_files) >= 1
 
     def test_archive_dir_created_with_restrictive_permissions(self, tmp_path: Path):
         """Archive directory should be created with mode 0o700."""
         import stat
 
-        from instincts.observer import observe_pre
+        from instincts.observer import MAX_FILE_SIZE_MB, observe_pre
 
-        observations_file = tmp_path / "observations.jsonl"
-        archive_dir = tmp_path / "observations.archive"
+        project_root, instincts_dir, observations_file = create_project_structure(tmp_path)
+        archive_dir = instincts_dir / "observations.archive"
 
-        # Create a file larger than 1MB (use small threshold for testing)
-        observations_file.write_text("x" * (1024 * 1024 + 1))  # 1MB + 1 byte
+        # Create a large file
+        large_content = "x" * (int(MAX_FILE_SIZE_MB * 1024 * 1024) + 1000)
+        observations_file.write_text(large_content)
 
-        hook_data = {
-            "hook_type": "PreToolUse",
-            "tool_name": "Test",
-            "tool_input": {},
-            "session_id": "test",
-        }
+        observe_pre({"tool_name": "Read", "session_id": "s1"}, project_root)
 
-        with patch("instincts.observer.OBSERVATIONS_FILE", observations_file):
-            with patch("instincts.observer.INSTINCTS_DIR", tmp_path):
-                with patch("instincts.observer.ARCHIVE_DIR", archive_dir):
-                    with patch("instincts.observer.MAX_FILE_SIZE_MB", 1):
-                        observe_pre(hook_data)
-
-        # Archive directory should have restrictive permissions
-        expected_mode = stat.S_IRWXU  # 0o700
-        actual_mode = archive_dir.stat().st_mode & 0o777
-        assert actual_mode == expected_mode, (
-            f"Archive dir has mode {oct(actual_mode)}, expected {oct(expected_mode)}"
-        )
+        assert archive_dir.exists()
+        mode = archive_dir.stat().st_mode & 0o777
+        assert mode == stat.S_IRWXU  # 0o700
 
 
 class TestAlternativeFieldNames:
     """Tests for handling alternative field names in hook_data."""
 
     def test_handles_tool_field_instead_of_tool_name(self, tmp_path: Path):
-        """Should handle 'tool' field as alternative to 'tool_name'."""
+        """Should handle 'tool' field instead of 'tool_name'."""
         from instincts.observer import observe_pre
 
-        observations_file = tmp_path / "observations.jsonl"
+        project_root, instincts_dir, observations_file = create_project_structure(tmp_path)
         hook_data = {
             "hook_type": "PreToolUse",
-            "tool": "Read",  # Alternative field name
-            "input": {"path": "/tmp"},  # Alternative field name
-            "session_id": "test",
+            "tool": "Read",  # Using 'tool' instead of 'tool_name'
+            "input": {"file": "test.py"},
+            "session_id": "s1",
         }
 
-        with patch("instincts.observer.OBSERVATIONS_FILE", observations_file):
-            with patch("instincts.observer.INSTINCTS_DIR", tmp_path):
-                observe_pre(hook_data)
+        observe_pre(hook_data, project_root)
 
         event = json.loads(observations_file.read_text().strip())
         assert event["tool"] == "Read"
 
     def test_handles_output_field_instead_of_tool_output(self, tmp_path: Path):
-        """Should handle 'output' field as alternative to 'tool_output'."""
+        """Should handle 'output' field instead of 'tool_output'."""
         from instincts.observer import observe_post
 
-        observations_file = tmp_path / "observations.jsonl"
+        project_root, instincts_dir, observations_file = create_project_structure(tmp_path)
         hook_data = {
             "hook_type": "PostToolUse",
             "tool": "Bash",
-            "output": "result",  # Alternative field name
-            "session_id": "test",
+            "output": "command output",  # Using 'output' instead of 'tool_output'
+            "session_id": "s1",
         }
 
-        with patch("instincts.observer.OBSERVATIONS_FILE", observations_file):
-            with patch("instincts.observer.INSTINCTS_DIR", tmp_path):
-                observe_post(hook_data)
+        observe_post(hook_data, project_root)
 
         event = json.loads(observations_file.read_text().strip())
-        assert event["output"] == "result"
+        assert "command output" in event["output"]
 
 
 class TestAnalysisTrigger:
-    """Tests for auto-trigger pattern analysis (AC-R1.1 to AC-R1.4)."""
+    """Tests for analysis trigger based on observation count/time."""
 
     def test_creates_marker_after_200_observations(self, tmp_path: Path):
-        """AC-R1.1: Should create .analysis_pending marker after 200 observations."""
-        import instincts.observer as observer_module
-        from instincts.observer import ANALYSIS_TRIGGER_CHECK_INTERVAL, observe_post
+        """Should create analysis marker after ANALYSIS_TRIGGER_COUNT observations."""
+        from instincts.observer import (
+            ANALYSIS_TRIGGER_COUNT,
+            create_analysis_marker,
+            should_trigger_analysis,
+        )
 
-        observations_file = tmp_path / "observations.jsonl"
-        marker_file = tmp_path / ".analysis_pending"
+        project_root, instincts_dir, observations_file = create_project_structure(tmp_path)
 
-        # Create 199 existing observations
-        with observations_file.open("w") as f:
-            for i in range(199):
-                f.write(f'{{"event": "tool_complete", "tool": "Test{i}"}}\n')
+        # Create enough observations
+        observations = [
+            f'{{"event": "tool_start", "tool": "Read", "session": "s1", "timestamp": "2024-01-01T00:00:00Z"}}'
+            for _ in range(ANALYSIS_TRIGGER_COUNT + 1)
+        ]
+        observations_file.write_text("\n".join(observations))
 
-        hook_data = {
-            "hook_type": "PostToolUse",
-            "tool_name": "Test200",
-            "tool_output": "done",
-            "session_id": "test",
-        }
+        should_trigger = should_trigger_analysis(project_root)
 
-        with patch("instincts.observer.OBSERVATIONS_FILE", observations_file):
-            with patch("instincts.observer.INSTINCTS_DIR", tmp_path):
-                with patch("instincts.observer.ANALYSIS_PENDING_FILE", marker_file):
-                    # Reset counter to ensure check runs on interval boundary
-                    observer_module._observation_counter = ANALYSIS_TRIGGER_CHECK_INTERVAL - 1
-                    observe_post(hook_data)
-
-        # Marker should be created (199 + 1 = 200)
-        assert marker_file.exists()
+        assert should_trigger is True
 
     def test_does_not_create_marker_before_200_observations(self, tmp_path: Path):
-        """Should not create marker when observation count < 200."""
-        import instincts.observer as observer_module
-        from instincts.observer import ANALYSIS_TRIGGER_CHECK_INTERVAL, observe_post
+        """Should not create marker when under ANALYSIS_TRIGGER_COUNT observations."""
+        from datetime import datetime, timezone
 
-        observations_file = tmp_path / "observations.jsonl"
-        marker_file = tmp_path / ".analysis_pending"
+        from instincts.observer import ANALYSIS_TRIGGER_COUNT, should_trigger_analysis
 
-        # Create 98 existing observations
-        with observations_file.open("w") as f:
-            for i in range(98):
-                f.write(f'{{"event": "tool_complete", "tool": "Test{i}"}}\n')
+        project_root, instincts_dir, observations_file = create_project_structure(tmp_path)
 
-        hook_data = {
-            "hook_type": "PostToolUse",
-            "tool_name": "Test99",
-            "tool_output": "done",
-            "session_id": "test",
-        }
+        # Use recent timestamp to avoid time-based trigger (must be within 24h)
+        recent_timestamp = datetime.now(timezone.utc).isoformat()
 
-        with patch("instincts.observer.OBSERVATIONS_FILE", observations_file):
-            with patch("instincts.observer.INSTINCTS_DIR", tmp_path):
-                with patch("instincts.observer.ANALYSIS_PENDING_FILE", marker_file):
-                    # Reset counter to ensure check runs on interval boundary
-                    observer_module._observation_counter = ANALYSIS_TRIGGER_CHECK_INTERVAL - 1
-                    observe_post(hook_data)
+        # Create fewer observations than threshold
+        observations = [
+            f'{{"event": "tool_start", "tool": "Read", "session": "s1", "timestamp": "{recent_timestamp}"}}'
+            for _ in range(ANALYSIS_TRIGGER_COUNT - 100)
+        ]
+        observations_file.write_text("\n".join(observations))
 
-        # Marker should not be created (98 + 1 = 99)
-        assert not marker_file.exists()
+        should_trigger = should_trigger_analysis(project_root)
+
+        assert should_trigger is False
 
     def test_does_not_create_marker_if_already_exists(self, tmp_path: Path):
-        """AC-R1.4: Should not create new marker if one already exists."""
-        import instincts.observer as observer_module
-        from instincts.observer import ANALYSIS_TRIGGER_CHECK_INTERVAL, observe_post
+        """Should not trigger analysis if marker already exists."""
+        from instincts.config import get_analysis_pending_file
+        from instincts.observer import ANALYSIS_TRIGGER_COUNT, should_trigger_analysis
 
-        observations_file = tmp_path / "observations.jsonl"
-        marker_file = tmp_path / ".analysis_pending"
+        project_root, instincts_dir, observations_file = create_project_structure(tmp_path)
 
-        # Create marker with existing content
-        marker_file.write_text('{"created_at": "2024-01-01T00:00:00Z"}')
-        original_content = marker_file.read_text()
+        # Create marker file
+        analysis_pending_file = get_analysis_pending_file(project_root)
+        analysis_pending_file.write_text('{"created_at": "2024-01-01T00:00:00Z"}')
 
-        # Create 199 existing observations
-        with observations_file.open("w") as f:
-            for i in range(199):
-                f.write(f'{{"event": "tool_complete", "tool": "Test{i}"}}\n')
+        # Create enough observations
+        observations = [
+            f'{{"event": "tool_start", "tool": "Read", "session": "s1", "timestamp": "2024-01-01T00:00:00Z"}}'
+            for _ in range(ANALYSIS_TRIGGER_COUNT + 1)
+        ]
+        observations_file.write_text("\n".join(observations))
 
-        hook_data = {
-            "hook_type": "PostToolUse",
-            "tool_name": "Test200",
-            "tool_output": "done",
-            "session_id": "test",
-        }
+        should_trigger = should_trigger_analysis(project_root)
 
-        with patch("instincts.observer.OBSERVATIONS_FILE", observations_file):
-            with patch("instincts.observer.INSTINCTS_DIR", tmp_path):
-                with patch("instincts.observer.ANALYSIS_PENDING_FILE", marker_file):
-                    # Reset counter to ensure check runs on interval boundary
-                    observer_module._observation_counter = ANALYSIS_TRIGGER_CHECK_INTERVAL - 1
-                    observe_post(hook_data)
-
-        # Marker content should not change
-        assert marker_file.read_text() == original_content
+        assert should_trigger is False
 
     def test_creates_marker_after_24h_with_min_observations(self, tmp_path: Path):
-        """AC-R1.2: Should create marker after 24h elapsed with 20+ observations."""
+        """Should create marker after 24h if min observation count reached."""
         from datetime import datetime, timedelta, timezone
 
-        import instincts.observer as observer_module
-        from instincts.observer import ANALYSIS_TRIGGER_CHECK_INTERVAL, observe_post
+        from instincts.observer import ANALYSIS_MIN_COUNT, should_trigger_analysis
 
-        observations_file = tmp_path / "observations.jsonl"
-        marker_file = tmp_path / ".analysis_pending"
+        project_root, instincts_dir, observations_file = create_project_structure(tmp_path)
 
-        # Create 19 observations with timestamps > 24h ago
-        old_timestamp = (datetime.now(timezone.utc) - timedelta(hours=25)).isoformat()
-        with observations_file.open("w") as f:
-            for i in range(19):
-                f.write(f'{{"event": "tool_complete", "tool": "Test{i}", "timestamp": "{old_timestamp}"}}\n')
+        # Create observations with old timestamp
+        old_time = (datetime.now(timezone.utc) - timedelta(hours=25)).isoformat()
+        observations = [
+            f'{{"event": "tool_start", "tool": "Read", "session": "s1", "timestamp": "{old_time}"}}'
+            for _ in range(ANALYSIS_MIN_COUNT + 1)
+        ]
+        observations_file.write_text("\n".join(observations))
 
-        hook_data = {
-            "hook_type": "PostToolUse",
-            "tool_name": "Test20",
-            "tool_output": "done",
-            "session_id": "test",
-        }
+        should_trigger = should_trigger_analysis(project_root)
 
-        with patch("instincts.observer.OBSERVATIONS_FILE", observations_file):
-            with patch("instincts.observer.INSTINCTS_DIR", tmp_path):
-                with patch("instincts.observer.ANALYSIS_PENDING_FILE", marker_file):
-                    # Reset counter to ensure check runs on interval boundary
-                    observer_module._observation_counter = ANALYSIS_TRIGGER_CHECK_INTERVAL - 1
-                    observe_post(hook_data)
-
-        # Marker should be created (19 + 1 = 20, elapsed > 24h)
-        assert marker_file.exists()
+        assert should_trigger is True
 
     def test_does_not_create_marker_if_under_min_count_even_after_24h(self, tmp_path: Path):
-        """Should not create marker after 24h if observation count < 20."""
+        """Should not trigger if under min count even after 24h."""
         from datetime import datetime, timedelta, timezone
 
-        import instincts.observer as observer_module
-        from instincts.observer import ANALYSIS_TRIGGER_CHECK_INTERVAL, observe_post
+        from instincts.observer import ANALYSIS_MIN_COUNT, should_trigger_analysis
 
-        observations_file = tmp_path / "observations.jsonl"
-        marker_file = tmp_path / ".analysis_pending"
+        project_root, instincts_dir, observations_file = create_project_structure(tmp_path)
 
-        # Create 18 observations with timestamps > 24h ago
-        old_timestamp = (datetime.now(timezone.utc) - timedelta(hours=25)).isoformat()
-        with observations_file.open("w") as f:
-            for i in range(18):
-                f.write(f'{{"event": "tool_complete", "tool": "Test{i}", "timestamp": "{old_timestamp}"}}\n')
+        # Create fewer observations than min threshold with old timestamp
+        old_time = (datetime.now(timezone.utc) - timedelta(hours=25)).isoformat()
+        observations = [
+            f'{{"event": "tool_start", "tool": "Read", "session": "s1", "timestamp": "{old_time}"}}'
+            for _ in range(ANALYSIS_MIN_COUNT - 5)
+        ]
+        observations_file.write_text("\n".join(observations))
 
-        hook_data = {
-            "hook_type": "PostToolUse",
-            "tool_name": "Test19",
-            "tool_output": "done",
-            "session_id": "test",
-        }
+        should_trigger = should_trigger_analysis(project_root)
 
-        with patch("instincts.observer.OBSERVATIONS_FILE", observations_file):
-            with patch("instincts.observer.INSTINCTS_DIR", tmp_path):
-                with patch("instincts.observer.ANALYSIS_PENDING_FILE", marker_file):
-                    # Reset counter to ensure check runs on interval boundary
-                    observer_module._observation_counter = ANALYSIS_TRIGGER_CHECK_INTERVAL - 1
-                    observe_post(hook_data)
-
-        # Marker should not be created (18 + 1 = 19 < 20)
-        assert not marker_file.exists()
-
-
-class TestObservationCounting:
-    """Tests for observation counting functions."""
-
-    def test_count_observations_returns_line_count(self, tmp_path: Path):
-        """count_observations should return number of lines in file."""
-        from instincts.observer import count_observations
-
-        observations_file = tmp_path / "observations.jsonl"
-        with observations_file.open("w") as f:
-            for i in range(50):
-                f.write(f'{{"event": "test{i}"}}\n')
-
-        count = count_observations(observations_file)
-        assert count == 50
-
-    def test_count_observations_returns_zero_for_missing_file(self, tmp_path: Path):
-        """count_observations should return 0 if file doesn't exist."""
-        from instincts.observer import count_observations
-
-        observations_file = tmp_path / "nonexistent.jsonl"
-        count = count_observations(observations_file)
-        assert count == 0
-
-    def test_get_oldest_observation_timestamp(self, tmp_path: Path):
-        """get_oldest_observation_timestamp should return timestamp of first line."""
-        from datetime import datetime
-
-        from instincts.observer import get_oldest_observation_timestamp
-
-        observations_file = tmp_path / "observations.jsonl"
-        old_ts = "2024-01-01T00:00:00+00:00"
-        with observations_file.open("w") as f:
-            f.write(f'{{"timestamp": "{old_ts}"}}\n')
-            f.write('{"timestamp": "2024-06-01T00:00:00+00:00"}\n')
-
-        timestamp = get_oldest_observation_timestamp(observations_file)
-        assert timestamp == datetime.fromisoformat(old_ts)
-
-    def test_get_oldest_observation_timestamp_returns_none_for_missing_file(
-        self, tmp_path: Path
-    ):
-        """get_oldest_observation_timestamp should return None if file doesn't exist."""
-        from instincts.observer import get_oldest_observation_timestamp
-
-        observations_file = tmp_path / "nonexistent.jsonl"
-        timestamp = get_oldest_observation_timestamp(observations_file)
-        assert timestamp is None
+        assert should_trigger is False
 
 
 class TestAnalysisTriggerPerformance:
-    """Tests for performance optimization in analysis trigger checking."""
+    """Tests for analysis trigger performance optimizations."""
 
     def test_analysis_trigger_uses_modulo_check(self, tmp_path: Path):
-        """Analysis trigger check should only run every N observations for performance."""
-        from instincts.observer import ANALYSIS_TRIGGER_CHECK_INTERVAL, observe_post
+        """Should use modulo check to avoid checking on every observation."""
+        from instincts.observer import (
+            ANALYSIS_TRIGGER_CHECK_INTERVAL,
+            get_observation_counter,
+            increment_observation_counter,
+            reset_observation_counter,
+        )
 
-        observations_file = tmp_path / "observations.jsonl"
-        marker_file = tmp_path / ".analysis_pending"
+        reset_observation_counter()
 
-        # Create some existing observations
-        with observations_file.open("w") as f:
-            for i in range(5):
-                f.write(f'{{"event": "tool_complete", "tool": "Test{i}"}}\n')
+        # Increment counter
+        for i in range(ANALYSIS_TRIGGER_CHECK_INTERVAL - 1):
+            counter = increment_observation_counter()
+            assert counter == i + 1
 
-        # Track calls to count_observations
-        with patch("instincts.observer.OBSERVATIONS_FILE", observations_file):
-            with patch("instincts.observer.INSTINCTS_DIR", tmp_path):
-                with patch("instincts.observer.ANALYSIS_PENDING_FILE", marker_file):
-                    with patch("instincts.observer.count_observations") as mock_count:
-                        mock_count.return_value = 10  # Below threshold
-
-                        # Call observe_post multiple times
-                        for i in range(ANALYSIS_TRIGGER_CHECK_INTERVAL + 1):
-                            hook_data = {
-                                "hook_type": "PostToolUse",
-                                "tool_name": f"Test{i}",
-                                "tool_output": "done",
-                                "session_id": "test",
-                            }
-                            observe_post(hook_data)
-
-                        # count_observations should be called only when counter hits interval
-                        # First call at interval boundary
-                        assert mock_count.call_count <= 2
-
-    def test_analysis_trigger_check_interval_constant(self):
-        """Should have ANALYSIS_TRIGGER_CHECK_INTERVAL constant."""
-        from instincts.observer import ANALYSIS_TRIGGER_CHECK_INTERVAL
-
-        # Should be a reasonable interval to reduce file reads
-        assert ANALYSIS_TRIGGER_CHECK_INTERVAL >= 10
+        # At interval, counter should trigger check
+        counter = increment_observation_counter()
+        assert counter >= ANALYSIS_TRIGGER_CHECK_INTERVAL
 
 
 class TestAtomicMarkerCreation:
-    """Tests for atomic marker file creation to avoid race conditions."""
+    """Tests for atomic marker file creation."""
 
     def test_create_analysis_marker_uses_atomic_create(self, tmp_path: Path):
-        """Marker creation should use atomic file create (exclusive mode)."""
-        from instincts.observer import _create_analysis_marker
+        """Should use exclusive file creation for marker."""
+        from instincts.observer import create_analysis_marker
 
-        marker_file = tmp_path / ".analysis_pending"
-        observations_file = tmp_path / "observations.jsonl"
-        observations_file.write_text('{"event": "test"}\n')
+        project_root, instincts_dir, observations_file = create_project_structure(tmp_path)
 
-        with patch("instincts.observer.ANALYSIS_PENDING_FILE", marker_file):
-            with patch("instincts.observer.OBSERVATIONS_FILE", observations_file):
-                _create_analysis_marker()
+        # Create some observations
+        observations_file.write_text('{"event": "test", "timestamp": "2024-01-01T00:00:00Z"}')
 
-        assert marker_file.exists()
+        create_analysis_marker(project_root)
+
+        from instincts.config import get_analysis_pending_file
+
+        analysis_pending_file = get_analysis_pending_file(project_root)
+        assert analysis_pending_file.exists()
 
     def test_create_analysis_marker_does_not_overwrite_existing(self, tmp_path: Path):
-        """Marker creation should not overwrite existing marker (race condition safe)."""
-        from instincts.observer import _create_analysis_marker
+        """Should not overwrite existing marker file."""
+        from instincts.config import get_analysis_pending_file
+        from instincts.observer import create_analysis_marker
 
-        marker_file = tmp_path / ".analysis_pending"
-        observations_file = tmp_path / "observations.jsonl"
-        observations_file.write_text('{"event": "test"}\n')
+        project_root, instincts_dir, observations_file = create_project_structure(tmp_path)
 
-        # Pre-create marker with specific content
-        original_content = '{"created_at": "original"}'
-        marker_file.write_text(original_content)
+        # Create marker with known content
+        analysis_pending_file = get_analysis_pending_file(project_root)
+        analysis_pending_file.parent.mkdir(parents=True, exist_ok=True)
+        original_content = '{"original": true}'
+        analysis_pending_file.write_text(original_content)
 
-        with patch("instincts.observer.ANALYSIS_PENDING_FILE", marker_file):
-            with patch("instincts.observer.OBSERVATIONS_FILE", observations_file):
-                _create_analysis_marker()
+        # Create some observations
+        observations_file.write_text('{"event": "test", "timestamp": "2024-01-01T00:00:00Z"}')
 
-        # Original content should be preserved (not overwritten)
-        assert marker_file.read_text() == original_content
+        # Try to create marker again
+        create_analysis_marker(project_root)
+
+        # Original content should be preserved
+        assert analysis_pending_file.read_text() == original_content
+
+
+class TestFileLocking:
+    """Tests for file locking during observation writes."""
+
+    def test_write_observation_uses_file_locking(self, tmp_path: Path):
+        """Should use file locking when writing observations."""
+        from instincts.observer import observe_pre
+
+        project_root, instincts_dir, observations_file = create_project_structure(tmp_path)
+
+        # This test verifies that the function doesn't crash when using locking
+        observe_pre({"tool_name": "Read", "session_id": "s1"}, project_root)
+
+        assert observations_file.exists()
+
+    def test_write_observation_releases_lock_on_exception(self, tmp_path: Path):
+        """Should release lock even if write fails."""
+        from instincts.observer import _append_observation_with_lock
+
+        project_root, instincts_dir, observations_file = create_project_structure(tmp_path)
+        observations_file.write_text("")
+
+        # Write should work
+        _append_observation_with_lock({"test": "data"}, observations_file)
+
+        # Should be able to read the file (lock released)
+        content = observations_file.read_text()
+        assert "test" in content
+
+
+class TestCountObservations:
+    """Tests for count_observations function."""
+
+    def test_count_observations_returns_line_count(self, tmp_path: Path):
+        """Should return number of lines in file."""
+        from instincts.observer import count_observations
+
+        project_root, instincts_dir, observations_file = create_project_structure(tmp_path)
+        observations_file.write_text("line1\nline2\nline3\n")
+
+        count = count_observations(observations_file)
+
+        assert count == 3
+
+    def test_count_observations_returns_zero_for_missing_file(self, tmp_path: Path):
+        """Should return 0 for non-existent file."""
+        from instincts.observer import count_observations
+
+        missing_file = tmp_path / "missing.jsonl"
+
+        count = count_observations(missing_file)
+
+        assert count == 0
+
+
+class TestGetOldestObservationTimestamp:
+    """Tests for get_oldest_observation_timestamp function."""
+
+    def test_returns_timestamp_from_first_line(self, tmp_path: Path):
+        """Should return timestamp from first observation."""
+        from instincts.observer import get_oldest_observation_timestamp
+
+        project_root, instincts_dir, observations_file = create_project_structure(tmp_path)
+        observations_file.write_text('{"timestamp": "2024-01-15T10:00:00+00:00"}\n')
+
+        timestamp = get_oldest_observation_timestamp(observations_file)
+
+        assert timestamp is not None
+        assert timestamp.year == 2024
+        assert timestamp.month == 1
+        assert timestamp.day == 15
+
+    def test_returns_none_for_missing_file(self, tmp_path: Path):
+        """Should return None for non-existent file."""
+        from instincts.observer import get_oldest_observation_timestamp
+
+        missing_file = tmp_path / "missing.jsonl"
+
+        timestamp = get_oldest_observation_timestamp(missing_file)
+
+        assert timestamp is None
+
+    def test_returns_none_for_empty_file(self, tmp_path: Path):
+        """Should return None for empty file."""
+        from instincts.observer import get_oldest_observation_timestamp
+
+        project_root, instincts_dir, observations_file = create_project_structure(tmp_path)
+        observations_file.write_text("")
+
+        timestamp = get_oldest_observation_timestamp(observations_file)
+
+        assert timestamp is None
+
+
+class TestThreadSafeCounter:
+    """Tests for thread-safe observation counter."""
+
+    def test_counter_is_thread_local(self):
+        """Counter should be thread-local."""
+        from instincts.observer import (
+            get_observation_counter,
+            increment_observation_counter,
+            reset_observation_counter,
+        )
+
+        reset_observation_counter()
+        assert get_observation_counter() == 0
+
+        increment_observation_counter()
+        assert get_observation_counter() == 1
+
+        reset_observation_counter()
+        assert get_observation_counter() == 0

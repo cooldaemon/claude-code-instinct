@@ -56,3 +56,67 @@ class TestTriggerStopWords:
         assert isinstance(TRIGGER_STOP_WORDS, tuple)
         assert "when" in TRIGGER_STOP_WORDS
         assert "creating" in TRIGGER_STOP_WORDS
+
+
+class TestSanitizeId:
+    """Tests for sanitize_id function (CR-003)."""
+
+    def test_sanitize_id_removes_path_traversal(self):
+        """CR-003: Should remove path traversal characters."""
+        from instincts.utils import sanitize_id
+
+        result = sanitize_id("../../../etc/passwd")
+        assert "/" not in result
+        assert ".." not in result
+
+    def test_sanitize_id_removes_dangerous_characters(self):
+        """CR-003: Should remove dangerous characters, keeping only alphanumeric, dash, underscore."""
+        from instincts.utils import sanitize_id
+
+        result = sanitize_id("test!@#$%^&*()id")
+        assert result == "test-id"
+
+    def test_sanitize_id_collapses_multiple_dashes(self):
+        """CR-003: Should collapse multiple dashes into one."""
+        from instincts.utils import sanitize_id
+
+        result = sanitize_id("test---multiple---dashes")
+        assert result == "test-multiple-dashes"
+
+    def test_sanitize_id_strips_leading_trailing_dashes(self):
+        """CR-003: Should strip leading and trailing dashes."""
+        from instincts.utils import sanitize_id
+
+        result = sanitize_id("---test-id---")
+        assert result == "test-id"
+
+    def test_sanitize_id_handles_empty_string(self):
+        """CR-003: Should return 'unnamed' for empty or fully-invalid input."""
+        from instincts.utils import sanitize_id
+
+        result = sanitize_id("")
+        assert result == "unnamed"
+        result = sanitize_id("!@#$%")
+        assert result == "unnamed"
+
+    def test_sanitize_id_handles_path_basename(self):
+        """CR-003: Should use basename to prevent path traversal."""
+        from instincts.utils import sanitize_id
+
+        result = sanitize_id("/some/path/to/instinct-id")
+        assert "/" not in result
+        assert "instinct-id" in result
+
+    def test_sanitize_id_preserves_dots_for_filenames(self):
+        """CR-003: Should optionally preserve dots for filename use."""
+        from instincts.utils import sanitize_id
+
+        result = sanitize_id("test.md", allow_dots=True)
+        assert result == "test.md"
+
+    def test_sanitize_id_removes_dots_by_default(self):
+        """CR-003: Should remove dots by default (for IDs)."""
+        from instincts.utils import sanitize_id
+
+        result = sanitize_id("test.md")
+        assert "." not in result
